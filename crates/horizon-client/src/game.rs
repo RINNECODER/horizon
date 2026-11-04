@@ -5159,8 +5159,8 @@ impl Game<'_> {
         self.process_level_events()?;
         Ok(removed)
     }
-    /// The `ItemStack.interactLivingEntity` fallback in `Player.interactOn`,
-    /// currently for native Mob entries after the entity's own action passed.
+    /// Native item fallback after normal mob actions in `Player.interactOn`.
+    /// This dispatches mod responses; built-in item effects stay in `interact_mob`.
     fn item_interact_mob(&mut self, target: Option<InteractTarget>) -> bool {
         if self.spectator() {
             return false;
