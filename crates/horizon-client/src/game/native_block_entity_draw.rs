@@ -184,11 +184,16 @@ impl BlockEntityDraw {
     /// seen from the axis' positive end, as `Axis.rotationDegrees`) through
     /// `pivot`, in blocks from the pose's origin: `[0.5; 3]` is the block's centre.
     pub fn rotate_about(&mut self, axis: [f32; 3], degrees: f32, pivot: [f32; 3]) {
+        self.rotate_about_radians(axis, degrees.to_radians(), pivot);
+    }
+    /// Turns by radians directly, retaining a caller's radian animation without
+    /// an intermediate degrees roundtrip. Axis and pivot follow `rotate_about`.
+    pub fn rotate_about_radians(&mut self, axis: [f32; 3], radians: f32, pivot: [f32; 3]) {
         let axis = Vec3::from_array(axis).normalize_or(Vec3::Y);
         let pivot = Vec3::from_array(pivot);
         self.apply(
             Mat4::from_translation(pivot)
-                * Mat4::from_quat(Quat::from_axis_angle(axis, degrees.to_radians()))
+                * Mat4::from_quat(Quat::from_axis_angle(axis, radians))
                 * Mat4::from_translation(-pivot),
         );
     }
@@ -969,6 +974,48 @@ mod tests {
         near(&hand_only[0], [10.0, 1.0, 0.0]);
         model.get_child_mut("arm").unwrap().visible = false;
         assert!(drawn(&model).is_empty());
+    }
+
+    #[test]
+    fn radian_animation_places_vertices_without_changing_degree_poses() {
+        let points = [
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        for angle in [1e-7, -0.125, std::f32::consts::PI, -17.75, 256.125] {
+            let mut d = draw();
+            d.rotate_about_radians([0.0, 1.0, 0.0], angle, [0.5; 3]);
+            d.quad(points, uv, sprite(), 0xffffff);
+            for (v, p) in d.vertices.iter().zip(points) {
+                let (x, z) = (p[0] - 0.5, p[2] - 0.5);
+                let expected = Vec3::new(
+                    10.5 + angle.cos() * x + angle.sin() * z,
+                    p[1],
+                    0.5 - angle.sin() * x + angle.cos() * z,
+                );
+                assert!(
+                    Vec3::from_array(v.pos).abs_diff_eq(expected, 2e-6),
+                    "{angle} {v:?} {expected}"
+                );
+            }
+        }
+        for degrees in [-1080.0f32, -0.001, 0.0, 90.0, 180.0, 719.125] {
+            let axis = Vec3::new(1.0, 2.0, -3.0).normalize_or(Vec3::Y);
+            let pivot = Vec3::new(-0.25, 0.5, 1.5);
+            let old = draw().pose()
+                * (Mat4::from_translation(pivot)
+                    * Mat4::from_quat(Quat::from_axis_angle(axis, degrees.to_radians()))
+                    * Mat4::from_translation(-pivot));
+            let mut d = draw();
+            d.rotate_about([1.0, 2.0, -3.0], degrees, pivot.to_array());
+            assert_eq!(
+                d.pose().to_cols_array().map(f32::to_bits),
+                old.to_cols_array().map(f32::to_bits)
+            );
+        }
     }
 
     #[test]
