@@ -144,6 +144,15 @@ pub struct ModRevision {
     born: u64,
     changes: u64,
 }
+impl ModRevision {
+    /// Whether both snapshots belong to the same live entity, despite content
+    /// changes or moves in its owner's storage. A newly created or cloned
+    /// `ModBlockEntity` has a different identity. Neither identity nor revision
+    /// is saved or sent over the network.
+    pub fn same_entity(self, other: Self) -> bool {
+        self.born == other.born
+    }
+}
 static MOD_BLOCK_ENTITIES_MADE: AtomicU64 = AtomicU64::new(0);
 impl ModBlockEntity {
     pub fn new(fields: ModBlockEntityFields) -> Self {
@@ -890,15 +899,23 @@ mod tests {
         for change in changes {
             change(&mut machine);
             assert!(!seen.contains(&machine.revision()));
+            assert!(machine.revision().same_entity(made));
             seen.push(machine.revision());
         }
+        // Moving an owner does not restart its retained client animation.
+        let machine = Box::new(machine);
+        assert!(machine.revision().same_entity(made));
         // Another entity, or a clone, never shares one, even with equal
         // contents; equality is the contents' alone.
         let copy = machine.clone();
         assert_eq!(copy, machine);
         assert!(!seen.contains(&copy.revision()));
+        assert!(!copy.revision().same_entity(made));
+        let snapshot = made;
+        assert!(snapshot.same_entity(made));
         let fresh = ModBlockEntity::default();
         assert_ne!(fresh.revision(), ModBlockEntity::default().revision());
+        assert!(!fresh.revision().same_entity(made));
     }
 
     #[test]
