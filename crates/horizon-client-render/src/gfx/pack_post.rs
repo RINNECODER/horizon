@@ -68,6 +68,8 @@ mod r11f_image_tests;
 
 #[cfg(test)]
 mod work_group_fold_tests;
+#[cfg(test)]
+mod shadowcolor_image_tests;
 
 #[cfg(test)]
 mod forced_flip_tests;
@@ -279,6 +281,8 @@ impl Entities {
 #[derive(Clone, Copy, PartialEq)]
 enum Image {
     Color(usize),
+    /// `shadowcolorimgN` outside the shadow buffers' programs: the side its sampler reads.
+    ShadowColor(usize),
     Custom(usize),
     /// The copy of a buffer or a pack image taken before a dispatch, which its loads read.
     ColorBefore(usize),
@@ -314,6 +318,14 @@ fn image_buffers(images: &[(u32, Image)]) -> u16 {
         .iter()
         .filter_map(|i| i.1.buffer())
         .fold(0, |m, b| m | 1 << b)
+}
+
+/// The shadowcolor buffers of `images` outside the shadow buffers' programs, as a mask.
+fn shadow_images(images: &[(u32, Image)]) -> u16 {
+    images.iter().fold(0, |m, i| match i.1 {
+        Image::ShadowColor(n) => m | 1 << n,
+        _ => m,
+    })
 }
 
 /// The format of the sink of passes that write only images.
@@ -1315,6 +1327,10 @@ struct Resources<'a> {
     gpu: Gpu,
     /// The buffers whose format can be bound as an image.
     storable: u16,
+    /// The shadowcolor buffers the pack has (bit n: shadowcolor n), and those whose format can
+    /// be bound as an image.
+    shadow_colors: u16,
+    shadow_storable: u16,
     /// The buffers of a three-channel format (`rgb`): they have no alpha to write, and read 1.
     rgb: u16,
     /// The bits per channel a buffer of a small packed format keeps ([`packed::bits`]).
@@ -1739,13 +1755,36 @@ fn bindings(
             dimension,
         });
     }
+    // The shadow buffers this program draws into, or (outside the shadow buffers' programs)
+    // samples: it can't also store into them. A shadow program sampling a buffer it stores
+    // into samples a copy, as other programs do with colortex buffers.
+    let busy_shadow = if group.shadow() {
+        in_place
+    } else {
+        shadow_reads
+    };
+    // `colorimgN` is buffer N; `shadowcolorimgN` is shadowcolor N, in any program while the
+    // shadow pass runs (shaders.properties docs, "shadowcolor"), and in a program of the shadow
+    // buffers its buffer N.
+    let buffer_image = |name: &str| {
+        let index = |prefix: &str| name.strip_prefix(prefix)?.parse::<usize>().ok();
+        match index("shadowcolorimg") {
+            Some(n) if shadow.is_some() && pack.shadow_colors & 1 << n != 0 => {
+                Some(if group.shadow() {
+                    Image::Color(n)
+                } else {
+                    Image::ShadowColor(n)
+                })
+            }
+            Some(_) => None,
+            None => index("colorimg")
+                .filter(|&n| n < BUFFERS && !group.shadow())
+                .map(Image::Color),
+        }
+    };
     let mut images = Vec::new();
     for i in &interface.images {
-        let buffer = i
-            .name
-            .strip_prefix("colorimg")
-            .and_then(|n| n.parse::<usize>().ok())
-            .filter(|&n| n < BUFFERS && !group.shadow());
+        let buffer = buffer_image(&i.name);
         let own = pack.images.iter().position(|c| c.def.name == i.name);
         let Some(format) = image_format(&i.format) else {
             notes.push(format!("{name}: `{}` has format {}", i.name, i.format));
@@ -1772,18 +1811,22 @@ fn bindings(
         };
         let (target, actual) = match (buffer, own) {
             (_, Some(k)) => (Image::Custom(k), pack.images[k].format),
-            (Some(b), None) => (Image::Color(b), formats[b]),
+            (Some(Image::ShadowColor(n)), None) => {
+                (Image::ShadowColor(n), shadow.map_or(format, |f| f[n]))
+            }
+            (Some(b), None) => (b, b.buffer().map_or(format, |b| formats[b])),
             (None, None) if i.before.is_some() => {
-                // Bound as the image it copies.
+                // Bound as the image it copies. The shadow buffers have no copies.
                 let of = i.before.as_deref().unwrap_or_default();
-                let buffer = of
-                    .strip_prefix("colorimg")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .filter(|&n| n < BUFFERS && !group.shadow());
-                match (buffer, pack.images.iter().position(|c| c.def.name == of)) {
+                match (
+                    buffer_image(of),
+                    pack.images.iter().position(|c| c.def.name == of),
+                ) {
                     (_, Some(k)) => (Image::CustomBefore(k), pack.images[k].format),
-                    (Some(b), None) => (Image::ColorBefore(b), formats[b]),
-                    (None, None) => stand_in(of, notes),
+                    (Some(Image::Color(b)), None) if !group.shadow() => {
+                        (Image::ColorBefore(b), formats[b])
+                    }
+                    _ => stand_in(of, notes),
                 }
             }
             (None, None) => stand_in(&i.name, notes),
@@ -1808,9 +1851,13 @@ fn bindings(
             "atomic" => wgpu::StorageTextureAccess::Atomic,
             _ => wgpu::StorageTextureAccess::ReadWrite,
         };
-        if let Image::Color(b) | Image::ColorBefore(b) = target
-            && pack.storable & 1 << b == 0
-        {
+        let storable = match target {
+            Image::Color(n) if group.shadow() => pack.shadow_storable & 1 << n != 0,
+            Image::ShadowColor(n) => pack.shadow_storable & 1 << n != 0,
+            Image::Color(b) | Image::ColorBefore(b) => pack.storable & 1 << b != 0,
+            _ => true,
+        };
+        if !storable {
             notes.push(format!(
                 "{name}: `{}` can't be an image on this GPU; skipped",
                 i.name
@@ -1827,7 +1874,21 @@ fn bindings(
             },
             count: None,
         });
+        if let Image::ShadowColor(n) = target {
+            shadow_reads |= 1 << n;
+        }
         images.push((i.binding, target));
+    }
+    let stored_shadow = if group.shadow() {
+        image_buffers(&images)
+    } else {
+        shadow_images(&images)
+    };
+    if let Some(n) = (0..SHADOW_COLORS).find(|n| busy_shadow & stored_shadow & 1 << n != 0) {
+        notes.push(format!(
+            "{name}: stores into shadowcolor{n} while reading or drawing it; skipped"
+        ));
+        return None;
     }
     Some((entries, samplers, slots, reads, shadow_reads, images))
 }
@@ -2479,6 +2540,7 @@ impl PackPost {
                 .map_or(formats[i], |f| f[i])
         });
         let (mut storage, mut copied, mut image_copied, mut snapshotted) = (0u16, 0u16, 0u64, 0u64);
+        let (mut shadow_storage, mut shadow_copied) = (0u16, 0u16);
         let gpu = Gpu::of(adapter, features);
         if !gpu.compute {
             notes.push("this GPU has no compute shaders: compute programs are skipped".into());
@@ -2548,6 +2610,12 @@ impl PackPost {
             indices: indices.as_ref(),
             gpu,
             storable,
+            shadow_colors,
+            shadow_storable: shadow_formats.map_or(0, |f| {
+                (0..SHADOW_COLORS)
+                    .filter(|&n| gpu.storable(adapter, f[n], features))
+                    .fold(0u16, |m, n| m | 1 << n)
+            }),
             rgb,
             packed,
             released: std::cell::Cell::new(("", 0)),
@@ -2678,10 +2746,19 @@ impl PackPost {
                     used |= p.reads | p.written | p.flip;
                     doubled |= p.flip;
                 }
-                storage |= image_buffers(&p.images);
+                if in_shadow {
+                    shadow_storage |= image_buffers(&p.images);
+                } else {
+                    storage |= image_buffers(&p.images);
+                }
+                shadow_storage |= shadow_images(&p.images);
                 image_copied |= p.image_copies;
                 snapshotted |= p.snapshots;
-                copied |= p.copies;
+                if in_shadow {
+                    shadow_copied |= p.copies;
+                } else {
+                    copied |= p.copies;
+                }
             }
             Some(pass)
         };
@@ -3172,6 +3249,7 @@ impl PackPost {
                 f,
                 colors,
                 shadow_doubled & colors,
+                (shadow_storage, shadow_copied),
                 depth1,
             );
             notes.push(format!(
@@ -3642,7 +3720,19 @@ impl PackPost {
                 s.clear(encoder);
             }
         }
-        if let Some(targets) = &self.targets {
+        let shadow = self.shadow_targets.as_ref().filter(|_| pass.group.shadow());
+        if let Some(t) = shadow {
+            for i in (0..SHADOW_COLORS).filter(|i| pass.copies & 1 << i != 0) {
+                if let (Some(c), Some(copy)) = (&t.color[i], &t.scratch[i]) {
+                    let side = &c[usize::from(t.main & 1 << i != 0)];
+                    encoder.copy_texture_to_texture(
+                        side.texture().as_image_copy(),
+                        copy.texture().as_image_copy(),
+                        side.texture().size(),
+                    );
+                }
+            }
+        } else if let Some(targets) = &self.targets {
             for i in (0..BUFFERS).filter(|i| pass.copies & 1 << i != 0) {
                 if let (Some(t), Some(copy)) = (&targets.color[i], &targets.scratch[i]) {
                     let side = usize::from(self.main & 1 << i != 0);
@@ -3706,11 +3796,13 @@ impl PackPost {
                 binding: 0,
                 resource: pass.ubo.as_entire_binding(),
             }];
+            let shadow_color =
+                |i: usize, side: usize| shadow.and_then(|t| t.color[i].as_ref()).map(|c| &c[side]);
             for s in &pass.samplers {
-                let shadow_color = |i: usize, side: usize| {
-                    shadow.and_then(|t| t.color[i].as_ref()).map(|c| &c[side])
-                };
                 let texture = match s.source {
+                    Source::Color(i) if shadow_space && pass.copies & 1 << i != 0 => shadow
+                        .and_then(|t| t.scratch[i].as_ref())
+                        .unwrap_or(&self.dummy),
                     Source::Color(i) if shadow_space => {
                         shadow_color(i, usize::from(key & 1 << i != 0)).unwrap_or(&self.dummy)
                     }
@@ -3843,6 +3935,11 @@ impl PackPost {
             // An image is the side its buffer's sampler reads.
             for &(binding, image) in &pass.images {
                 let view = match image {
+                    Image::Color(i) if shadow_space => {
+                        shadow_color(i, usize::from(key & 1 << i != 0)).unwrap_or(&self.dummy)
+                    }
+                    Image::ShadowColor(i) => shadow_color(i, usize::from(key & 1 << (32 + i) != 0))
+                        .unwrap_or(&self.dummy),
                     Image::Color(i) => {
                         let side = usize::from(key & 1 << i != 0);
                         targets.color[i].as_ref().map_or(&self.dummy, |t| &t[side])
@@ -6035,6 +6132,8 @@ mod tests {
             indices: None,
             gpu: Gpu::of(&adapter, device.features()),
             storable: 0,
+            shadow_colors: 0,
+            shadow_storable: 0,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
@@ -6137,6 +6236,8 @@ mod tests {
             shadow_linear: 0,
             jobs: None,
             packed: [None; BUFFERS],
+            shadow_colors: 0,
+            shadow_storable: 0,
         };
         let (_, samplers, ..) = bindings(
             device.features(),
@@ -6214,6 +6315,8 @@ mod tests {
             indices: None,
             gpu: Gpu::of(&adapter, device.features()),
             storable: 0,
+            shadow_colors: 0,
+            shadow_storable: 0,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
@@ -6357,6 +6460,8 @@ mod tests {
             indices: None,
             gpu: Gpu::of(&adapter, device.features()),
             storable: 0,
+            shadow_colors: 0,
+            shadow_storable: 0,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
