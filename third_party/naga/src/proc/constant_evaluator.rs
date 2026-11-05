@@ -1167,6 +1167,16 @@ impl<'a> ConstantEvaluator<'a> {
                         ))
                 {
                     Ok(self.append_expr(expr, span, ExpressionKind::Runtime))
+                } else if matches!(self.behavior, Behavior::Glsl(GlslRestrictions::Runtime(_)))
+                    && matches!(
+                        eval_result,
+                        Err(ConstantEvaluatorError::Overflow(_)
+                            | ConstantEvaluatorError::Literal(_))
+                    )
+                {
+                    // GLSL float overflow gives +-inf (IEEE), which a Naga literal can't hold:
+                    // compute it where the program runs.
+                    Ok(self.append_expr(expr, span, ExpressionKind::Runtime))
                 } else {
                     eval_result
                 }

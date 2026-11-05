@@ -924,7 +924,13 @@ impl Frontend {
 
                 Ok(result)
             }
-            FunctionKind::Macro(builtin) => builtin.call(self, ctx, arguments.as_mut_slice(), meta),
+            // A builtin's expressions have no span of their own: blame the call.
+            FunctionKind::Macro(builtin) => builtin
+                .call(self, ctx, arguments.as_mut_slice(), meta)
+                .map_err(|e| match e.meta.is_defined() {
+                    true => e,
+                    false => Error { meta, ..e },
+                }),
         }
     }
 
