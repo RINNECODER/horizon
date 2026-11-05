@@ -38,6 +38,8 @@ pub(super) struct ShadowTargets {
     /// Both sides of each shadowcolor buffer used; one texture for both when no `shadowcomp`
     /// program draws into or flips the buffer.
     pub color: [Option<[wgpu::TextureView; 2]>; SHADOW_COLORS],
+    /// A copy of each buffer a shadow program both samples and stores into, which it samples.
+    pub scratch: [Option<wgpu::TextureView>; SHADOW_COLORS],
     /// The clear colour of each buffer cleared every frame.
     pub clears: [Option<[f32; 4]>; SHADOW_COLORS],
     /// Bit n set: B is shadowcolor n's "main".
@@ -100,11 +102,18 @@ impl ShadowTargets {
     pub fn reset_history(&mut self, device: &wgpu::Device, shadow: &horizon_shaders::Shadow) {
         let mut colors = 0;
         let mut doubled = 0;
+        let mut images = (0, 0);
         let formats = std::array::from_fn(|n| match &self.color[n] {
             Some([a, b]) => {
                 colors |= 1 << n;
                 if a.texture() != b.texture() {
                     doubled |= 1 << n;
+                }
+                if a.texture().usage().contains(wgpu::TextureUsages::STORAGE_BINDING) {
+                    images.0 |= 1 << n;
+                }
+                if self.scratch[n].is_some() {
+                    images.1 |= 1 << n;
                 }
                 a.texture().format()
             }
@@ -116,19 +125,22 @@ impl ShadowTargets {
             formats,
             colors,
             doubled,
+            images,
             self.depth1.is_some(),
         );
     }
 
-    /// The buffers of `shadow` the pack uses: `colors` (bit n: shadowcolor n), `depth1` when
-    /// some program reads `shadowtex1`, `doubled` (bit n: shadowcolor n needs a B texture). The
-    /// resolution is kept within the device's limit.
+    /// The buffers of `shadow` the pack uses: `colors` (bit n: shadowcolor n), of them
+    /// `images.0` bound as images and `images.1` also copied for a program that samples them,
+    /// `depth1` when some program reads `shadowtex1`, `doubled` (bit n: shadowcolor n needs a B
+    /// texture). The resolution is kept within the device's limit.
     pub fn new(
         device: &wgpu::Device,
         shadow: &horizon_shaders::Shadow,
         formats: [wgpu::TextureFormat; SHADOW_COLORS],
         colors: u16,
         doubled: u16,
+        images: (u16, u16),
         depth1: bool,
     ) -> Self {
         let size = shadow
@@ -136,6 +148,25 @@ impl ShadowTargets {
             .clamp(1, device.limits().max_texture_dimension_2d);
         let copy = wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
         let depth = wgpu::TextureFormat::Depth32Float;
+        let usage = |n: usize| {
+            let mut usage = wgpu::TextureUsages::empty();
+            usage.set(wgpu::TextureUsages::STORAGE_BINDING, images.0 & 1 << n != 0);
+            usage.set(wgpu::TextureUsages::COPY_SRC, images.1 & 1 << n != 0);
+            usage
+        };
+        let scratch = std::array::from_fn(|n| {
+            (colors & images.1 & 1 << n != 0).then(|| {
+                let label = format!("Shader pack shadowcolor{n} copy");
+                target(
+                    device,
+                    &label,
+                    size,
+                    formats[n],
+                    wgpu::TextureUsages::COPY_DST,
+                )
+                .1
+            })
+        });
         let color = std::array::from_fn(|n| {
             (colors & 1 << n != 0).then(|| {
                 let side = |side: &str| {
@@ -145,7 +176,7 @@ impl ShadowTargets {
                         &label,
                         size,
                         formats[n],
-                        wgpu::TextureUsages::empty(),
+                        usage(n),
                     )
                     .1
                 };
@@ -163,6 +194,7 @@ impl ShadowTargets {
             depth: target(device, "Shader pack shadowtex0", size, depth, copy),
             depth1: depth1.then(|| target(device, "Shader pack shadowtex1", size, depth, copy)),
             color,
+            scratch,
             clears: std::array::from_fn(|n| {
                 let b = &shadow.colors[n];
                 b.clear.then(|| b.clear_color.unwrap_or([1.0; 4]))
