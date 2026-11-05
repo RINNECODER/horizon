@@ -674,7 +674,10 @@ pub struct PackPost {
     /// The shadow buffers, when the shadow pass runs (2.5), and the `shadowcomp` programs.
     shadow_targets: Option<super::pack_shadow::ShadowTargets>,
     /// What draws terrain from the light (`shadow`), and translucent terrain (`shadow_water`).
+    /// With `shadow_solid` or `shadow_cutout`, `shadow_terrain` draws the solid part and
+    /// `shadow_cutout` the cutout part, each over all of the shadow camera's solid draws.
     shadow_terrain: Option<Pass>,
+    shadow_cutout: Option<Pass>,
     /// `end_portal.png`'s atlas rect this frame, and a texture of its own copied from it that
     /// End portal draws bind as their atlas.
     portal_rect: [f32; 4],
@@ -2722,6 +2725,10 @@ impl PackPost {
             .shadow
             .zip(shadow_geometry.as_ref())
             .and_then(|(p, g)| build(p, Some(g)));
+        let shadow_cutout = post
+            .shadow_cutout
+            .zip(shadow_geometry.as_ref())
+            .and_then(|(p, g)| build(p, Some(g)));
         // A GPU that refuses translucent terrain's program with the boats' water patches gets it
         // without them (`Post::shadow_water_plain`), rather than no translucent shadows at all.
         let mut plain = post.shadow_water_plain;
@@ -3030,6 +3037,7 @@ impl PackPost {
         }
         for (part, pass) in [
             ("terrain", &shadow_terrain),
+            ("cutout terrain", &shadow_cutout),
             ("translucent terrain", &shadow_water),
         ] {
             if let Some(p) = pass {
@@ -3131,7 +3139,12 @@ impl PackPost {
                 .chain(&terrain)
                 .chain(&terrain_cutout)
                 .chain(&water))
-            .chain(shadow_terrain.iter().chain(&shadow_water))
+            .chain(
+                shadow_terrain
+                    .iter()
+                    .chain(&shadow_cutout)
+                    .chain(&shadow_water),
+            )
             .chain(sky.iter().flat_map(|s| s.basic.iter().chain(&s.textured)))
             .chain(entities.iter().flat_map(|e| e.passes.iter().flatten()))
             .chain(entities.iter().flat_map(|e| e.shadow.iter().flatten()))
@@ -3394,6 +3407,7 @@ impl PackPost {
             water_mask_dirty: true,
             shadow_targets,
             shadow_terrain,
+            shadow_cutout,
             portal_rect: [0.0; 4],
             portal_texture: None,
             shadow_water,
@@ -3986,7 +4000,8 @@ impl PackPost {
         draw: &mut TerrainDraw<'_>,
     ) {
         self.draw_terrain_part(device, queue, encoder, size, list, false, draw);
-        if list == TerrainList::Solid {
+        // Solid terrain's cutout part; in the shadow pass only with `shadow_cutout`.
+        if matches!(list, TerrainList::Solid | TerrainList::ShadowSolid) {
             self.draw_terrain_part(device, queue, encoder, size, list, true, draw);
         }
     }
@@ -3997,6 +4012,7 @@ impl PackPost {
             TerrainList::Solid if cutout => &mut self.terrain_cutout,
             TerrainList::Solid => &mut self.terrain,
             TerrainList::Translucent => &mut self.water,
+            TerrainList::ShadowSolid if cutout => &mut self.shadow_cutout,
             TerrainList::ShadowSolid => &mut self.shadow_terrain,
             TerrainList::ShadowTranslucent => &mut self.shadow_water,
         }
@@ -4822,7 +4838,9 @@ impl PackPost {
     /// Whether the pack's shadow pass draws terrain (`shadow_view`).
     pub fn has_shadow(&self) -> bool {
         self.shadow_targets.is_some()
-            && (self.shadow_terrain.is_some() || self.shadow_water.is_some())
+            && (self.shadow_terrain.is_some()
+                || self.shadow_cutout.is_some()
+                || self.shadow_water.is_some())
     }
 
     /// Whether the pack draws the sky (disc, sunset, stars, void) itself.
@@ -4877,6 +4895,7 @@ impl PackPost {
             .chain(self.hand.iter_mut().map(|h| &mut h.0))
             .chain(self.hand_more.iter_mut().flatten())
             .chain(&mut self.shadow_terrain)
+            .chain(&mut self.shadow_cutout)
             .chain(&mut self.shadow_water)
             .chain(&mut self.shadow_comp);
         for pass in passes {
@@ -5267,6 +5286,7 @@ impl PackPost {
         let passes = self
             .shadow_terrain
             .iter()
+            .chain(self.shadow_cutout.iter())
             .chain(self.shadow_water.iter())
             .chain(self.shadow_comp.iter())
             .chain(

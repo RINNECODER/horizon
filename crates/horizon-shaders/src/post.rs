@@ -559,8 +559,12 @@ pub struct Post {
     /// Some program reads a shadow buffer, or `shadow.enabled=true`: the shadow pass runs (2.5).
     pub shadow_pass: bool,
     /// When it runs: what draws solid and cutout terrain from the light (`shadow`), and
-    /// translucent terrain (`shadow_water` or `shadow`), into the shadow buffers (2.4).
+    /// translucent terrain (`shadow_water` or `shadow`), into the shadow buffers (2.4). A pack
+    /// with Iris 1.8's `shadow_solid` or `shadow_cutout` draws terrain in its two parts
+    /// (`GameInputs::terrain_parts`): `shadow` (`shadow_solid` or `shadow`) the solid part,
+    /// `shadow_cutout` (`shadow_cutout` or `shadow`) the cutout part.
     pub shadow: Option<PostProgram>,
+    pub shadow_cutout: Option<PostProgram>,
     pub shadow_water: Option<PostProgram>,
     /// `shadow_water` without the boats' water patches (`GbuffersInputs::water_patches`), for a
     /// GPU that refuses it with them: their vertex output is one more than a pack writing as
@@ -634,6 +638,7 @@ impl Post {
             &self.lightning,
             &self.spidereyes,
             &self.shadow,
+            &self.shadow_cutout,
             &self.shadow_water,
             &self.shadow_entities,
             &self.shadow_block,
@@ -811,6 +816,7 @@ pub fn load_post(
         clouds_off: false,
         shadow_pass: false,
         shadow: None,
+        shadow_cutout: None,
         shadow_water: None,
         shadow_water_plain: None,
         shadow_entities: None,
@@ -1214,20 +1220,23 @@ pub fn load_post(
     load_shadow(
         &mut loader,
         inputs.terrain.as_ref(),
+        inputs.terrain_parts.as_ref(),
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
     );
     post
 }
 
-/// Whether the shadow pass runs (2.5) and, when it does, its programs: `shadow_solid` and
-/// `shadow_cutout` are not used (2.4, Legacy); the game's solid and cutout terrain is one draw.
+/// Whether the shadow pass runs (2.5) and, when it does, its programs. A pack with `shadow_solid`
+/// or `shadow_cutout` (Iris 1.8) draws terrain in `parts`, each part with its program or `shadow`
+/// (shaders.properties docs, "shadow"); any other pack draws all solid terrain with `shadow`.
 /// `shadow_entities` and `shadow_block` read the entities' vertices (`entities`). A program
 /// with a geometry stage reads its vertices itself: `geometry` holds how, for terrain and for
 /// entities.
 fn load_shadow(
     loader: &mut Loader<'_>,
     terrain: Option<&GbuffersInputs>,
+    parts: Option<&[GbuffersInputs; 2]>,
     entities: Option<&GbuffersInputs>,
     geometry: [Option<&crate::GeometryInputs>; 2],
 ) {
@@ -1286,11 +1295,18 @@ fn load_shadow(
         // (`shadowDistance` and `sunPathRotation` probed, #10490), and nothing else of them
         // (nothing else was probed). The other shadow programs' files were not probed; they are
         // read as `shadow`, formats only.
-        let names = ["shadow", "shadow_water", "shadow_entities", "shadow_block"]
-            .map(str::to_owned)
-            .into_iter()
-            .chain(std::iter::once("shadowcomp".to_owned()))
-            .chain((1..=99).map(|n| format!("shadowcomp{n}")));
+        let names = [
+            "shadow",
+            "shadow_solid",
+            "shadow_cutout",
+            "shadow_water",
+            "shadow_entities",
+            "shadow_block",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .chain(std::iter::once("shadowcomp".to_owned()))
+        .chain((1..=99).map(|n| format!("shadowcomp{n}")));
         for name in names {
             // `shadow.fsh`'s shadow settings count too (`Config::read_formats_and_shadow`).
             let shadow = name == "shadow";
@@ -1307,6 +1323,9 @@ fn load_shadow(
         loader.post.shadow_comp.extend(program);
     }
     let properties = loader.properties;
+    let split = ["shadow_solid", "shadow_cutout"]
+        .iter()
+        .any(|n| loader.has(n));
     let mut load =
         |names: &[&str], inputs: Option<&GbuffersInputs>, terrain: bool, cutout: bool| {
             let inputs = inputs?;
@@ -1346,14 +1365,20 @@ fn load_shadow(
     let set = |key: &str| properties.get(key).is_some_and(|v| v.trim() == "true");
     let only_player = !keep("shadowEntities") && set("shadowPlayer");
     let only_lit = !keep("shadowBlockEntities") && set("shadowLightBlockEntities");
-    let shadow = keep("shadowTerrain")
-        .then(|| load(&["shadow"], terrain, true, true))
-        .flatten();
     // Its water keeps out of the boats' water patches (`GbuffersInputs::water_patches`).
     let water_inputs = terrain.map(|t| GbuffersInputs {
         water_patches: true,
         ..t.clone()
     });
+    // Solid terrain's part keeps no default test, as gbuffers_terrain_solid's doesn't.
+    let (shadow, shadow_cutout) = match parts.filter(|_| split) {
+        _ if !keep("shadowTerrain") => (None, None),
+        Some([solid, cut]) => (
+            load(&["shadow_solid", "shadow"], Some(solid), true, false),
+            load(&["shadow_cutout", "shadow"], Some(cut), true, true),
+        ),
+        None => (load(&["shadow"], terrain, true, true), None),
+    };
     let water = keep("shadowTranslucent")
         .then(|| {
             load(
@@ -1376,7 +1401,7 @@ fn load_shadow(
     // The plain one's notes are the patched one's again: each once.
     let mut seen = std::collections::HashSet::new();
     loader.post.notes.retain(|n| seen.insert(n.clone()));
-    if shadow.is_none() && terrain.is_some() {
+    if shadow.is_none() && shadow_cutout.is_none() && terrain.is_some() {
         loader
             .post
             .notes
@@ -1384,6 +1409,7 @@ fn load_shadow(
     }
     loader.geometry = None;
     loader.post.shadow = shadow;
+    loader.post.shadow_cutout = shadow_cutout;
     loader.post.shadow_water = water;
     loader.post.shadow_water_plain = water_plain;
     loader.post.shadow_entities = shadow_entities;
@@ -3245,6 +3271,40 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
 
     const TERRAIN_VSH: &str = "#version 120\nvoid main() { gl_Position = ftransform(); }\n";
     const TERRAIN_FSH: &str = "#version 120\nvoid main() { gl_FragData[0] = vec4(1.0); }\n";
+
+    /// Iris 1.8's `shadow_solid` and `shadow_cutout` draw the terrain parts, each falling back to
+    /// `shadow`; a pack with only them still has a shadow pass, one with neither draws all solid
+    /// terrain with `shadow`.
+    #[test]
+    fn split_shadow_programs_draw_the_terrain_parts() {
+        let reads = "#version 120\nuniform sampler2D shadowtex0;\n\
+                     void main() { gl_FragColor = texture2D(shadowtex0, vec2(0.5)); }\n";
+        let load = |programs: &[&str]| {
+            let mut files = vec![
+                ("composite.vsh".to_owned(), VSH),
+                ("composite.fsh".to_owned(), reads),
+            ];
+            for p in programs {
+                files.push((format!("{p}.vsh"), TERRAIN_VSH));
+                files.push((format!("{p}.fsh"), TERRAIN_FSH));
+            }
+            let post = terrain_files(&files, "", true);
+            assert!(post.shadow_pass, "{:?}", post.notes);
+            let name = |p: &Option<PostProgram>| p.as_ref().map(|p| p.name.clone());
+            (name(&post.shadow), name(&post.shadow_cutout))
+        };
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            load(&["shadow_solid", "shadow_cutout"]),
+            (some("shadow_solid"), some("shadow_cutout"))
+        );
+        assert_eq!(
+            load(&["shadow", "shadow_cutout"]),
+            (some("shadow"), some("shadow_cutout"))
+        );
+        assert_eq!(load(&["shadow_solid"]), (some("shadow_solid"), None));
+        assert_eq!(load(&["shadow"]), (some("shadow"), None));
+    }
 
     /// The pack of `files` (under `shaders/`), with `properties`, loaded with the game's terrain
     /// inputs and, with `parts`, its two parts.
