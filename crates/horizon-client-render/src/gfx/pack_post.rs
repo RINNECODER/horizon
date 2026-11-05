@@ -72,6 +72,9 @@ mod work_group_fold_tests;
 mod shadowcolor_image_tests;
 
 #[cfg(test)]
+mod read_write_buffer_tests;
+
+#[cfg(test)]
 mod forced_flip_tests;
 
 #[cfg(test)]
@@ -320,12 +323,13 @@ fn image_buffers(images: &[(u32, Image)]) -> u16 {
         .fold(0, |m, b| m | 1 << b)
 }
 
-/// The pack images (and stand-ins) `images` binds in another format than their declared one
-/// (`Gpu::backing`): binding, declared format, format made.
+/// The pack images, stand-ins and buffers `images` binds in another format than their declared
+/// one (`Gpu::backing`): binding, declared format, format made.
 fn image_formats(
     images: &[(u32, Image)],
     interface: &horizon_shaders::Interface,
     pack: &Resources<'_>,
+    formats: &[wgpu::TextureFormat; BUFFERS],
 ) -> Vec<(u32, wgpu::TextureFormat, wgpu::TextureFormat)> {
     images
         .iter()
@@ -333,6 +337,7 @@ fn image_formats(
             let made = match image {
                 Image::Custom(k) | Image::CustomBefore(k) => pack.images[k].format,
                 Image::StandIn(format, _) => format,
+                Image::Color(b) | Image::ColorBefore(b) => formats[b],
                 _ => return None,
             };
             let declared = interface.images.iter().find(|i| i.binding == binding)?;
@@ -1890,7 +1895,10 @@ fn bindings(
             (None, None) => stand_in(&i.name, notes),
         };
         let format = match target {
-            Image::Color(_) | Image::ShadowColor(_) | Image::ColorBefore(_) => declared,
+            // A buffer made in its twin binds as the twin, like a pack image.
+            Image::Color(_) | Image::ShadowColor(_) | Image::ColorBefore(_) if actual != backed => {
+                declared
+            }
             _ => backed,
         };
         // An `R11F_G11F_B10F` image or buffer this device makes `RGBA16F` (a float stand-in
@@ -2134,7 +2142,7 @@ fn build_pass(
         });
         let module = |mut m: naga::Module| {
             share_samplers(&mut m, &slots);
-            pack_images::widen_images(&mut m, &image_formats(&images, interface, pack));
+            pack_images::widen_images(&mut m, &image_formats(&images, interface, pack, formats));
             storage_formats_of(&mut m, &entries);
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&p.name),
@@ -2367,7 +2375,10 @@ fn build_compute(
         });
         let mut module = c.module;
         share_samplers(&mut module, &slots);
-        pack_images::widen_images(&mut module, &image_formats(&images, interface, pack));
+        pack_images::widen_images(
+            &mut module,
+            &image_formats(&images, interface, pack, formats),
+        );
         storage_formats_of(&mut module, &entries);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&name),
@@ -2526,10 +2537,18 @@ impl PackPost {
         // What the pack's shaders need of its storage buffers, before its parts move out.
         let minimums = post.buffer_minimums();
         let features = device.features();
+        let gpu = Gpu::of(adapter, features);
+        // A buffer a program reads and writes as `colorimgN`, in a format this device can't
+        // both read and write, is made in a twin as pack images are (`Gpu::backing`).
         let formats: [wgpu::TextureFormat; BUFFERS] = std::array::from_fn(|i| {
             let f = post.config.buffers[i].format;
-            snorm_format(f, features, adapter)
-                .unwrap_or_else(|| target_format(f, features, adapter))
+            let f = snorm_format(f, features, adapter)
+                .unwrap_or_else(|| target_format(f, features, adapter));
+            if post.reads_and_writes_image(&format!("colorimg{i}")) {
+                gpu.backing(adapter, f, features)
+            } else {
+                f
+            }
         });
         let sky_clear = Some(&post.config.buffers[0])
             .filter(|b| b.clear)
@@ -2605,7 +2624,6 @@ impl PackPost {
         });
         let (mut storage, mut copied, mut image_copied, mut snapshotted) = (0u16, 0u16, 0u64, 0u64);
         let (mut shadow_storage, mut shadow_copied) = (0u16, 0u16);
-        let gpu = Gpu::of(adapter, features);
         if !gpu.compute {
             notes.push("this GPU has no compute shaders: compute programs are skipped".into());
         }
