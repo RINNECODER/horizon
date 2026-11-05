@@ -22,7 +22,7 @@ use horizon_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 use smallvec::SmallVec;
 
 use super::pack_draw::DrawUniforms;
-use super::pack_entities::{ARMOR_GLINT, BEAM, GLINT, PROGRAMS, PackEntities};
+use super::pack_entities::{ARMOR_GLINT, BEAM, GLINT, LIGHTNING, PROGRAMS, PackEntities};
 use super::pack_images;
 use super::pack_sky::PackSky;
 use super::pack_textures;
@@ -2778,6 +2778,7 @@ impl PackPost {
             post.particles_translucent,
             post.glint,
             post.armor_glint,
+            post.lightning,
         ];
         let mut late = [
             false,
@@ -2791,6 +2792,8 @@ impl PackPost {
             post.translucent_late,
             true,
             false,
+            false,
+            // Lightning draws before deferred (it is not among the programs after it).
             false,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
@@ -2843,7 +2846,8 @@ impl PackPost {
                         cull: false,
                     };
                     paged(build(p, Some(&glint)))
-                } else if p.name == "gbuffers_damagedblock" {
+                } else if p.name == "gbuffers_damagedblock" || at == LIGHTNING {
+                    // Neither the crack nor lightning writes depth, as vanilla draws them.
                     paged(build(p, Some(&g.with_depth(false))))
                 } else {
                     paged(build(p, Some(g)))
@@ -3055,6 +3059,7 @@ impl PackPost {
             "the armour glint",
             "translucent particles",
             "translucent block entities",
+            "lightning bolts",
         ];
         if let Some(l) = &lines {
             notes.push(format!("the block outline draws with {}", l.name));
@@ -4368,6 +4373,13 @@ impl PackPost {
             motion,
             glint_ticks,
         );
+    }
+
+    /// Whether the pack draws lightning bolts (`gbuffers_lightning` or a fallback).
+    pub fn draws_lightning(&self) -> bool {
+        self.entities
+            .as_ref()
+            .is_some_and(|e| e.passes[LIGHTNING].is_some())
     }
 
     /// Every stage a posable subject can use must have a compiled fallback.

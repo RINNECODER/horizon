@@ -948,7 +948,9 @@ fn material_runs<'a>(
 /// own texture.
 pub const GLINT: usize = 8;
 pub const ARMOR_GLINT: usize = 9;
-pub const PROGRAMS: usize = 10;
+/// Lightning bolts (`gbuffers_lightning`).
+pub const LIGHTNING: usize = 10;
+pub const PROGRAMS: usize = 11;
 
 /// The program that draws the glint of a quad with overlay code `overlay`, if it has one.
 fn glint_program(overlay: u32) -> Option<usize> {
@@ -1049,7 +1051,9 @@ impl Motion {
 }
 
 pub fn program_of(span: &EntitySpan) -> Option<usize> {
-    Some(if span.stage == render_stage("ENTITIES") {
+    Some(if span.lightning {
+        LIGHTNING
+    } else if span.stage == render_stage("ENTITIES") {
         if span.translucent {
             TRANSLUCENT
         } else {
@@ -1117,14 +1121,14 @@ mod tests {
         assert_eq!(
             drawn_by_pack(
                 &spans[1],
-                [true, true, true, false, true, true, false, false, true, true]
+                [true, true, true, false, true, true, false, false, true, true, true]
             ),
             None
         );
         assert_eq!(
             drawn_by_pack(
                 &spans[2],
-                [true, false, true, true, true, true, false, false, true, true]
+                [true, false, true, true, true, true, false, false, true, true, true]
             ),
             None
         );
@@ -1625,6 +1629,66 @@ mod gpu_span_tests {
         let (draws, _) = prepare(no_entities, &mut rest);
         assert!(draws.iter().all(|d| !d.2), "{draws:?}");
         assert_eq!(rest.len(), 8, "the boat and its patch stay Horizon's");
+    }
+
+    #[test]
+    fn lightning_bolts_draw_with_their_own_program_and_cast_no_shadow() {
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
+        else {
+            return;
+        };
+        let layout = super::super::pack_draw::DrawUniforms::new(&device);
+        let mut geometry = PackEntities::new(&device, &layout.layout);
+        let bolts = [super::super::lightning::Bolt {
+            at: [10.0, 64.0, 10.0],
+            seed: 7,
+        }];
+        let input = super::super::lightning::Input {
+            bolts: &bolts,
+            uv: [0.5, 0.5],
+            entity_id: 42,
+        };
+        let mut cpu = Vec::new();
+        super::super::lightning::pack_vertices(&input, glam::DVec3::new(0.0, 64.0, 0.0), &mut cpu);
+        let spans = [EntitySpan {
+            start: 0,
+            id: 42,
+            stage: render_stage("ENTITIES"),
+            lightning: true,
+            ..Default::default()
+        }];
+        let mut rest = Vec::new();
+        geometry.prepare(
+            &device,
+            &queue,
+            &layout.layout,
+            &cpu,
+            &spans,
+            [true; PROGRAMS],
+            ([0.; 4], [1; 2]),
+            Casters {
+                entities: true,
+                ..Default::default()
+            },
+            &mut rest,
+            None,
+            (&[], &[]),
+            0.0,
+        );
+        assert!(rest.is_empty(), "Horizon draws none of the bolt");
+        assert_eq!(
+            (geometry.draws.iter())
+                .map(|d| (d.program, d.pack, d.shadow, d.quads))
+                .collect::<Vec<_>>(),
+            [(LIGHTNING, true, false, 4 * 14 * 4)],
+        );
+        // Camera-relative, from the bolt up: its foot is at the bolt's height, the camera's.
+        let lowest = cpu.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+        assert_eq!(lowest, 0.0);
     }
 
     #[test]

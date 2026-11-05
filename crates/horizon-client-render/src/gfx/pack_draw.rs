@@ -25,6 +25,8 @@ pub struct EntitySpan {
     pub player: bool,
     /// A block entity whose block emits light (`shadowLightBlockEntities`).
     pub emissive: bool,
+    /// Lightning bolts (`gbuffers_lightning`).
+    pub lightning: bool,
 }
 
 impl EntitySpan {
