@@ -649,6 +649,21 @@ impl Post {
             .chain(&self.shadow_comp)
     }
 
+    /// Whether a program declares image `name` (`colorimg3`) both read and written: neither
+    /// `readonly` nor `writeonly`.
+    pub fn reads_and_writes_image(&self, name: &str) -> bool {
+        self.every_program().any(|p| {
+            let stages = p.program.iter().map(|s| &s.interface);
+            stages
+                .chain(p.compute.iter().map(|(_, c)| &c.interface))
+                .any(|i| {
+                    i.images
+                        .iter()
+                        .any(|image| image.name == name && image.access.is_empty())
+                })
+        })
+    }
+
     /// The fewest bytes each storage buffer (`bufferObject.<n>`, set 4) needs for every stage
     /// that binds it: its block's size as the stage lays it out (std430). OpenGL binds a smaller buffer and leaves what lies
     /// past its end undefined; wgpu refuses to draw or dispatch with one.
