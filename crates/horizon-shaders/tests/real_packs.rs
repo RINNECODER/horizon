@@ -227,6 +227,8 @@ fn real_packs_read() {
                         .into(),
                     index: "uint(@)".into(),
                 }),
+                sky_geometry: None,
+                celestial_geometry: None,
             };
                 let mut macros = macros.clone();
                 if std::env::var_os("SUBGROUPS").is_some() {

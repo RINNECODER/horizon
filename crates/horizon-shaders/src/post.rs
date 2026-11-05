@@ -6,7 +6,8 @@
 //! Decisions (impl-plan.md):
 //! - OQ-12: a dimension's folder (`world0`, `world-1`, `world1`) replaces the base folder for that
 //!   dimension when it exists; every stage file is read from it.
-//! - OQ-29: a program with a geometry stage is reported and treated as missing.
+//! - OQ-29: a program with a geometry stage runs for terrain, entities and the sky (shadow and
+//!   gbuffers programs, `translate_geometry`); any other is reported and treated as missing.
 //! - A program that fails to translate is reported and treated as missing (2.5).
 //! - Terrain draws with the first program of its fallback chain that loads (2.3).
 
@@ -762,10 +763,14 @@ pub struct GameInputs {
     /// UV and texture matrix) and over held items (`hand`'s).
     pub glint: Option<GbuffersInputs>,
     pub hand_glint: Option<GbuffersInputs>,
-    /// Terrain read vertex by vertex, for a shadow program with a geometry stage.
+    /// Terrain read vertex by vertex, for a shadow or gbuffers program with a geometry stage.
     pub terrain_geometry: Option<crate::GeometryInputs>,
     /// Entities and block entities read vertex by vertex, for the same.
     pub entity_geometry: Option<crate::GeometryInputs>,
+    /// The sky's and the sun and moon's vertices read one by one, for `gbuffers_skybasic` and
+    /// `gbuffers_skytextured` with a geometry stage.
+    pub sky_geometry: Option<crate::GeometryInputs>,
+    pub celestial_geometry: Option<crate::GeometryInputs>,
 }
 
 /// Loads the post-processing programs of `folder` and, for the geometry `inputs` describes, the
@@ -939,7 +944,11 @@ pub fn load_post(
     // Whether the pack has a program for each part, loaded or not.
     let [has_solid, has_cutout] =
         [&TERRAIN_SOLID, &TERRAIN_CUTOUT].map(|chain| chain.iter().any(|n| loader.has(n)));
-    let mut gbuffers = |names: &[&str], group, inputs: &GbuffersInputs| {
+    // `geometry`: how a geometry stage reads these vertices, when the game can draw them so.
+    let mut gbuffers = |names: &[&str],
+                        group,
+                        inputs: &GbuffersInputs,
+                        geometry: Option<&crate::GeometryInputs>| {
         names.iter().find_map(|name| {
             // `alphaTest.<program>` replaces the geometry's default test (OQ-23).
             let key = properties.get(&format!("alphaTest.{name}"));
@@ -952,19 +961,33 @@ pub fn load_post(
                     parts.cutout_alpha_test = test;
                 }
             }
-            loader.load(name.to_string(), group, |v, f| {
+            // The geometry stage pulls the vertices with this part's alpha test and statements.
+            loader.geometry = geometry.map(|g| crate::GeometryInputs {
+                inputs: GbuffersInputs {
+                    declarations: g.inputs.declarations.clone(),
+                    ..inputs.clone()
+                },
+                ..g.clone()
+            });
+            let p = loader.load(name.to_string(), group, |v, f| {
                 translate_gbuffers(v, f, Target::Buffers, &inputs)
-            })
+            });
+            loader.geometry = None;
+            p
         })
     };
     // The sky's parts blend as vanilla draws them (the sunset fan translucent, the stars
     // [`STARS_BLEND`], the disc and the void not at all), unless `blend.*` says otherwise. Iris 1.11.7 left exactly what
     // `gbuffers_skybasic` wrote on the sky disc, alpha 0.25 included, with a probe pack of ours
     // (#10490).
+    let (terrain_geometry, entity_geometry) = (
+        inputs.terrain_geometry.as_ref(),
+        inputs.entity_geometry.as_ref(),
+    );
     let sky = inputs
         .sky
         .as_ref()
-        .and_then(|i| gbuffers(&SKY, Group::Gbuffers, i));
+        .and_then(|i| gbuffers(&SKY, Group::Gbuffers, i, inputs.sky_geometry.as_ref()));
     let sky = sky.map(|mut p| {
         let own = blend(properties, &p.name);
         p.vanilla_sky_blends = own.is_none();
@@ -972,7 +995,14 @@ pub fn load_post(
         p
     });
     let celestial = inputs.celestial.as_ref();
-    let sky_textured = celestial.and_then(|i| gbuffers(&SKY_TEXTURED, Group::Gbuffers, i));
+    let sky_textured = celestial.and_then(|i| {
+        gbuffers(
+            &SKY_TEXTURED,
+            Group::Gbuffers,
+            i,
+            inputs.celestial_geometry.as_ref(),
+        )
+    });
     let sky_textured = sky_textured.map(|mut p| {
         p.blend = blend(properties, &p.name).unwrap_or(Some(CELESTIAL_BLEND));
         p
@@ -987,15 +1017,22 @@ pub fn load_post(
     };
     let (entities, block) = match &inputs.entities {
         Some(i) => (
-            entity_blend(gbuffers(&ENTITIES, Group::Gbuffers, i)),
-            entity_blend(gbuffers(&BLOCK, Group::Gbuffers, i)),
+            entity_blend(gbuffers(&ENTITIES, Group::Gbuffers, i, entity_geometry)),
+            entity_blend(gbuffers(&BLOCK, Group::Gbuffers, i, entity_geometry)),
         ),
         None => (None, None),
     };
     let damaged_block = inputs
         .entities
         .as_ref()
-        .and_then(|i| gbuffers(&["gbuffers_damagedblock"], Group::Gbuffers, i))
+        .and_then(|i| {
+            gbuffers(
+                &["gbuffers_damagedblock"],
+                Group::Gbuffers,
+                i,
+                entity_geometry,
+            )
+        })
         .map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some([
                 Factor::DstColor,
@@ -1007,22 +1044,28 @@ pub fn load_post(
         });
     // Translucent entities and particles blend (OQ-23). Particles keep vanilla's alpha cut at
     // 0.1; translucent entities lose only fully transparent texels (a shadow fades out).
-    let translucent =
-        |names: &[&str],
-         cut: f32,
-         gbuffers: &mut dyn FnMut(&[&str], &GbuffersInputs) -> Option<PostProgram>| {
-            let i = inputs.entities.as_ref()?;
-            let mut i = i.clone();
-            i.alpha_test = Some(crate::AlphaTest {
-                op: ">",
-                reference: cut,
-            });
-            gbuffers(names, &i).map(|mut p| {
-                p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
-                p
-            })
+    let translucent = |names: &[&str],
+                       cut: f32,
+                       gbuffers: &mut dyn FnMut(
+        &[&str],
+        &GbuffersInputs,
+        Option<&crate::GeometryInputs>,
+    ) -> Option<PostProgram>| {
+        let i = inputs.entities.as_ref()?;
+        let mut i = i.clone();
+        i.alpha_test = Some(crate::AlphaTest {
+            op: ">",
+            reference: cut,
+        });
+        gbuffers(names, &i, entity_geometry).map(|mut p| {
+            p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
+            p
+        })
+    };
+    let mut gbuffers_dyn =
+        |names: &[&str], i: &GbuffersInputs, g: Option<&crate::GeometryInputs>| {
+            gbuffers(names, Group::Gbuffers, i, g)
         };
-    let mut gbuffers_dyn = |names: &[&str], i: &GbuffersInputs| gbuffers(names, Group::Gbuffers, i);
     let entities_translucent = translucent(&ENTITIES_TRANSLUCENT, 0.0, &mut gbuffers_dyn);
     // The eyes blend as vanilla's `RenderTypes.eyes` does (translucent, entity_batch.rs).
     let spidereyes = translucent(&SPIDEREYES, 0.1, &mut gbuffers_dyn);
@@ -1037,7 +1080,7 @@ pub fn load_post(
     // The glint blends as vanilla's does, over the item or armour drawn before it; one program
     // for each glint texture (the item's, the armour's).
     let mut glint = |inputs: Option<&GbuffersInputs>| {
-        gbuffers_dyn(&ARMOR_GLINT, inputs?).map(|mut p| {
+        gbuffers_dyn(&ARMOR_GLINT, inputs?, None).map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(GLINT_BLEND));
             p
         })
@@ -1055,7 +1098,7 @@ pub fn load_post(
     let clouds = inputs
         .clouds
         .as_ref()
-        .and_then(|i| gbuffers_dyn(&CLOUDS, i));
+        .and_then(|i| gbuffers_dyn(&CLOUDS, i, None));
     let clouds = clouds.map(|mut p| {
         p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
         p
@@ -1064,7 +1107,7 @@ pub fn load_post(
     let lines = inputs
         .lines
         .as_ref()
-        .and_then(|i| gbuffers_dyn(&LINES, i))
+        .and_then(|i| gbuffers_dyn(&LINES, i, None))
         .map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
@@ -1073,7 +1116,7 @@ pub fn load_post(
     let weather = inputs
         .weather
         .as_ref()
-        .and_then(|i| gbuffers(&WEATHER, Group::Translucent, i));
+        .and_then(|i| gbuffers(&WEATHER, Group::Translucent, i, None));
     let weather = weather.map(|mut p| {
         p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
         p
@@ -1082,7 +1125,7 @@ pub fn load_post(
     let hand = inputs
         .hand
         .as_ref()
-        .and_then(|i| gbuffers(&HAND, Group::Gbuffers, i))
+        .and_then(|i| gbuffers(&HAND, Group::Gbuffers, i, None))
         .map(|mut p| {
             p.blend = blend(properties, &p.name).flatten();
             p
@@ -1091,7 +1134,7 @@ pub fn load_post(
     let hand_water = inputs
         .hand
         .as_ref()
-        .and_then(|i| gbuffers(&HAND_WATER, Group::Translucent, i))
+        .and_then(|i| gbuffers(&HAND_WATER, Group::Translucent, i, None))
         .map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
@@ -1123,8 +1166,13 @@ pub fn load_post(
         let mut lone = None;
         let (solid, terrain_cutout) = match parts {
             Some([solid, cut]) => {
-                let solid = gbuffers(&TERRAIN_SOLID, Group::Gbuffers, solid);
-                let cut = gbuffers(&TERRAIN_CUTOUT, Group::Gbuffers, &cutout(cut));
+                let solid = gbuffers(&TERRAIN_SOLID, Group::Gbuffers, solid, terrain_geometry);
+                let cut = gbuffers(
+                    &TERRAIN_CUTOUT,
+                    Group::Gbuffers,
+                    &cutout(cut),
+                    terrain_geometry,
+                );
                 // One part loaded: its name, the other part, and whether the pack has a
                 // program for that one.
                 let one = match (&solid, &cut) {
@@ -1160,10 +1208,18 @@ pub fn load_post(
                     if let Some(parts) = &mut both.parts {
                         parts.cutout_alpha_test = parts.cutout_alpha_test.or(cut);
                     }
-                    (gbuffers(&TERRAIN, Group::Gbuffers, &both), None)
+                    (gbuffers(&TERRAIN, Group::Gbuffers, &both, terrain_geometry), None)
                 }
                 // A game that draws terrain in one part: all of it with the cutout test.
-                None => (gbuffers(&TERRAIN, Group::Gbuffers, &cutout(terrain)), None),
+                None => (
+                    gbuffers(
+                        &TERRAIN,
+                        Group::Gbuffers,
+                        &cutout(terrain),
+                        terrain_geometry,
+                    ),
+                    None,
+                ),
             },
         };
         // gbuffers_water falls back to gbuffers_terrain's chain (2.3).
@@ -1175,6 +1231,7 @@ pub fn load_post(
                 water_mask: true,
                 ..terrain.clone()
             },
+            terrain_geometry,
         );
         loader.post.notes.extend(lone);
         loader.post.terrain_undrawn = !has_solid && !has_cutout;
@@ -1531,7 +1588,7 @@ impl Loader<'_> {
         if self.pack.exists(&path("gsh")) {
             let Some(inputs) = self.geometry.clone() else {
                 self.post.notes.push(format!(
-                    "{name}: uses a geometry stage (supported for the shadow pass's terrain and entities only); skipped"
+                    "{name}: uses a geometry stage (supported for terrain, entities and the sky only); skipped"
                 ));
                 return None;
             };
@@ -1710,7 +1767,7 @@ impl Loader<'_> {
         }
         let [vertex, geometry, fragment] = &stages;
         let (program, triangles) =
-            match crate::translate_geometry(vertex, geometry, fragment, inputs) {
+            match crate::translate_geometry(vertex, geometry, fragment, inputs, group.shadow()) {
                 Ok(p) => p,
                 Err(errors) => {
                     notes.extend(
@@ -1731,12 +1788,14 @@ impl Loader<'_> {
         self.post.config.read_vertex(vertex);
         self.post.config.read(fragment);
         let mut buffers =
-            config::draw_buffers(fragment).unwrap_or_else(|| default_draw_buffers(true));
-        let kept = buffers
-            .iter()
-            .position(|&b| b as usize >= self.shadow_buffers(fragment))
-            .unwrap_or(buffers.len());
-        buffers.truncate(kept);
+            config::draw_buffers(fragment).unwrap_or_else(|| default_draw_buffers(group.shadow()));
+        if group.shadow() {
+            let kept = buffers
+                .iter()
+                .position(|&b| b as usize >= self.shadow_buffers(fragment))
+                .unwrap_or(buffers.len());
+            buffers.truncate(kept);
+        }
         Some(PostProgram {
             buffer_blends: buffer_blends(self.properties, &name),
             flips: flips(self.properties, &name),
@@ -2614,7 +2673,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         let notes = post.notes.join("\n");
         assert!(
             notes.contains(
-                "composite4: uses a geometry stage (supported for the shadow pass's terrain and entities only)"
+                "composite4: uses a geometry stage (supported for terrain, entities and the sky only)"
             ),
             "{notes}"
         );
@@ -3173,6 +3232,94 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         );
     }
 
+    /// Gbuffers programs with a geometry stage draw terrain (water falling back to it), the sun
+    /// and moon, and entities when the game reads their vertices one by one; the hand, which it
+    /// doesn't, is reported and falls back along its chain.
+    #[test]
+    fn gbuffers_geometry_stages_draw_what_the_game_reads_vertex_by_vertex() {
+        let vsh = "#version 330\nout vec2 vUv;\nvoid main() { gl_Position = ftransform(); vUv = vec2(0.0); }\n";
+        let gsh = "#version 330\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n\
+                   in vec2 vUv[];\nout vec2 gUv;\nvoid main() {\n    for (int i = 0; i < 3; i++) {\n        \
+                   gl_Position = gl_in[i].gl_Position;\n        gUv = vUv[i] + float(gl_PrimitiveIDIn);\n        \
+                   EmitVertex();\n    }\n    EndPrimitive();\n}\n";
+        let fsh = "#version 330\nin vec2 gUv;\n/* DRAWBUFFERS:02 */\nvoid main() {\n    \
+                   gl_FragData[0] = vec4(gUv, 0.0, 1.0);\n    gl_FragData[1] = vec4(1.0);\n}\n";
+        let mut files = vec![
+            ("shaders/gbuffers_textured.vsh", VSH),
+            ("shaders/gbuffers_textured.fsh", FSH),
+        ];
+        for name in [
+            "gbuffers_terrain",
+            "gbuffers_skytextured",
+            "gbuffers_entities",
+            "gbuffers_hand",
+        ] {
+            files.extend(
+                [("vsh", vsh), ("gsh", gsh), ("fsh", fsh)]
+                    .map(|(ext, src)| (&*format!("shaders/{name}.{ext}").leak(), src)),
+            );
+        }
+        let pack = Pack::from_zip_bytes("t", zip(&files)).unwrap();
+        let game = crate::GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;\n".into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n".into(),
+            ..Default::default()
+        };
+        let geometry = crate::GeometryInputs {
+            inputs: crate::GbuffersInputs {
+                declarations: format!(
+                    "layout(set = 5, binding = 0) readonly buffer V {{ uint v[]; }};\n{}",
+                    game.declarations
+                ),
+                ..game.clone()
+            },
+            pull: "        hz_v_pos = uintBitsToFloat(uvec3(v[hz_vertex_index], v[hz_vertex_index], v[hz_vertex_index]));\n"
+                .into(),
+            index: "uint(@)".into(),
+        };
+        let inputs = GameInputs {
+            terrain: Some(game.clone()),
+            celestial: Some(game.clone()),
+            entities: Some(game.clone()),
+            hand: Some(game),
+            terrain_geometry: Some(geometry.clone()),
+            celestial_geometry: Some(geometry.clone()),
+            entity_geometry: Some(geometry),
+            ..Default::default()
+        };
+        let post = load_post(
+            &pack,
+            "",
+            &Properties::default(),
+            &Macros::standard(),
+            &inputs,
+        );
+        for p in [
+            &post.terrain,
+            &post.water,
+            &post.sky_textured,
+            &post.entities,
+        ] {
+            let p = p.as_ref().unwrap_or_else(|| panic!("{:?}", post.notes));
+            assert_eq!(p.geometry_triangles, 1, "{}", p.name);
+            // A gbuffers program's outputs go to its colortex buffers, not the shadow pass's two.
+            assert_eq!(p.buffers, vec![0, 2], "{}", p.name);
+        }
+        assert_eq!(post.terrain.as_ref().unwrap().name, "gbuffers_terrain");
+        let hand = post.hand.as_ref().unwrap();
+        assert_eq!(
+            (hand.name.as_str(), hand.geometry_triangles),
+            ("gbuffers_textured", 0)
+        );
+        assert!(
+            post.notes
+                .iter()
+                .any(|n| n.starts_with("gbuffers_hand: uses a geometry stage")),
+            "{:?}",
+            post.notes
+        );
+    }
+
     /// Water falls back to the terrain chain and blends by default, as the sky does; entities
     /// and block entities fall back along theirs; `blend.*` overrides.
     /// `clouds=off` hides the game's clouds and drops the pack's own cloud program.
@@ -3554,6 +3701,8 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             hand_glint: Some(inputs),
             terrain_geometry: None,
             entity_geometry: None,
+            sky_geometry: None,
+            celestial_geometry: None,
         };
         let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
         let (terrain, water) = (post.terrain.unwrap(), post.water.unwrap());

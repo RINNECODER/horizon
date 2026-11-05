@@ -258,6 +258,8 @@ struct Sky {
     geometry: PackSky,
     basic: Option<Pass>,
     textured: Option<Pass>,
+    /// The sky's and the sun and moon's vertices, for programs with a geometry stage.
+    vertex_groups: Option<[wgpu::BindGroup; 2]>,
 }
 
 /// Entities, block entities, translucent entity parts and particles a pack draws
@@ -2315,6 +2317,18 @@ fn build_pass(
     })
 }
 
+/// Draws entity run `d`. With a geometry stage (`geometry` triangles it can emit, the instances)
+/// the program reads its vertices itself: corner `c` of the run is vertex `c` past the run's
+/// first quad's six (`pack_entities::geometry_inputs`).
+fn draw_run(rp: &mut wgpu::RenderPass<'_>, d: &super::pack_entities::Draw, geometry: u32) {
+    if geometry > 0 {
+        let first = d.base / 4 * 6;
+        rp.draw(first..first + d.quads * 6, 0..geometry);
+    } else {
+        rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+    }
+}
+
 /// The pack's images a pass both samples and stores.
 fn image_copies(samplers: &[Binding], images: &[(u32, Image)]) -> u64 {
     samplers
@@ -2926,10 +2940,15 @@ impl PackPost {
                 cull: false,
             };
             let textured = post.sky_textured.and_then(|p| build(p, Some(&textured)));
+            let vertex_groups = ([&basic, &textured].iter())
+                .any(|p| p.as_ref().is_some_and(|p| p.geometry > 0))
+                .then(|| indices.as_ref().map(|l| geometry.vertex_groups(device, l)))
+                .flatten();
             Sky {
                 geometry,
                 basic,
                 textured,
+                vertex_groups,
             }
         });
         let sky = sky.filter(|s| s.basic.is_some() || s.textured.is_some());
@@ -4297,6 +4316,9 @@ impl PackPost {
                     rp.set_bind_group(4, g, &[]);
                 }
                 sky.geometry.bind(rp, part.textured);
+                if let Some(groups) = sky.vertex_groups.as_ref().filter(|_| pass.geometry > 0) {
+                    rp.set_bind_group(5, &groups[i], &[]);
+                }
                 open.as_mut().expect("open").1 = i;
             }
             let rp = &mut open.as_mut().expect("open").0;
@@ -4313,7 +4335,8 @@ impl PackPost {
             if pass.draw {
                 self.draws.bind(rp, part.stage);
             }
-            rp.draw(part.range, 0..1);
+            // A geometry stage reads its vertices itself, one instance per triangle it can emit.
+            rp.draw(part.range, 0..pass.geometry.max(1));
         }
         drop(open);
         self.sky = Some(sky);
@@ -4384,7 +4407,7 @@ impl PackPost {
                     if pass.draw {
                         rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
                     }
-                    rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+                    draw_run(&mut rp, d, pass.geometry);
                 }
             }
             // The boats' water patches, depth only, into their own depth: translucent terrain
@@ -4520,15 +4543,7 @@ impl PackPost {
                 if pass.draw {
                     rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
                 }
-                if pass.geometry > 0 {
-                    // A geometry stage reads its vertices itself: corner `c` of the run is
-                    // vertex `c` past the run's first quad's six (`geometry_inputs`), one
-                    // instance per triangle the stage can emit.
-                    let first = d.base / 4 * 6;
-                    rp.draw(first..first + d.quads * 6, 0..pass.geometry);
-                } else {
-                    rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
-                }
+                draw_run(&mut rp, d, pass.geometry);
             }
         }
         self.entities = Some(entities);

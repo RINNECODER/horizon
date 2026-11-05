@@ -1,10 +1,10 @@
-//! A program with a geometry stage (`shadow.gsh`), which wgpu lacks: its vertex, geometry and
-//! fragment stages become one vertex stage and the fragment stage. The game draws its triangles
-//! without an index buffer, three vertices each, and one instance per triangle the geometry stage
-//! can emit: vertex invocation `v` of instance `t` stands for corner `v % 3` of the stage's
-//! triangle `t`. It reads its input triangle's three vertices itself (`GeometryInputs::index`,
-//! `pull`), runs the pack's vertex stage on each, then the geometry stage, keeping the corner it
-//! stands for; a corner the stage does not emit is degenerate.
+//! A program with a geometry stage (`shadow.gsh`, `gbuffers_terrain.gsh`...), which wgpu lacks:
+//! its vertex, geometry and fragment stages become one vertex stage and the fragment stage. The
+//! game draws its triangles without an index buffer, three vertices each, and one instance per
+//! triangle the geometry stage can emit: vertex invocation `v` of instance `t` stands for corner
+//! `v % 3` of the stage's triangle `t`. It reads its input triangle's three vertices itself
+//! (`GeometryInputs::index`, `pull`), runs the pack's vertex stage on each, then the geometry
+//! stage, keeping the corner it stands for; a corner the stage does not emit is degenerate.
 //!
 //! The geometry stage runs once per output corner; the image and buffer writes it makes as
 //! statements run in one of them only (`hz_primary`).
@@ -29,13 +29,17 @@ pub struct GeometryInputs {
     pub index: String,
 }
 
-/// Translates `vertex`, `geometry` and `fragment` (a shadow program): the program, and how many
-/// triangles the geometry stage can emit (the instances to draw).
+/// Translates `vertex`, `geometry` and `fragment` (a gbuffers program, or with `shadow` a shadow
+/// program): the program, and how many triangles the geometry stage can emit (the instances to
+/// draw). `gl_PrimitiveIDIn` is the input triangle's index from vertex 0, not from the draw's
+/// first vertex as in GL (shortcut: unique and of the same parity within a quad, which is what
+/// it identifies; count from the draw's first vertex if a pack needs GL's numbering).
 pub fn translate_geometry(
     vertex: &Preprocessed,
     geometry: &Preprocessed,
     fragment: &Preprocessed,
     inputs: &GeometryInputs,
+    shadow: bool,
 ) -> Result<(Program, u32), Vec<Error>> {
     let (combined, triangles) = combine(vertex, geometry, inputs)?;
     let mut gbuffers = inputs.inputs.clone();
@@ -52,7 +56,13 @@ pub fn translate_geometry(
     // The vertex's place isn't the fragment's through a geometry stage.
     gbuffers.water_patches = false;
     gbuffers.attributes = Vec::new();
-    let program = super::translate(&combined, fragment, Target::Buffers, Some(&gbuffers), true)?;
+    let program = super::translate(
+        &combined,
+        fragment,
+        Target::Buffers,
+        Some(&gbuffers),
+        shadow,
+    )?;
     Ok((program, triangles))
 }
 
@@ -274,15 +284,26 @@ fn combine(
             }
             Kind::Interface("out", vars) => gs_outs.extend(vars.iter().cloned()),
             Kind::Layout(storage) => {
-                if *storage == "out" {
-                    let words: Vec<&str> = gs_tokens[s.range.clone()]
-                        .iter()
-                        .copied()
-                        .filter(|t| significant(t))
-                        .collect();
-                    if let Some(p) = words.iter().position(|w| *w == "max_vertices") {
-                        max_vertices = words.get(p + 2).and_then(|n| n.parse::<u32>().ok());
-                    }
+                let words: Vec<&str> = gs_tokens[s.range.clone()]
+                    .iter()
+                    .copied()
+                    .filter(|t| significant(t))
+                    .collect();
+                // The game draws triangles, and a strip of them is all this emulates: another
+                // primitive would draw wrong, so it is reported instead.
+                let other = if *storage == "in" {
+                    ["points", "lines", "lines_adjacency", "triangles_adjacency"].as_slice()
+                } else {
+                    ["points", "line_strip"].as_slice()
+                };
+                if let Some(w) = words.iter().find(|w| other.contains(w)) {
+                    return Err(error(format!(
+                        "`layout({w}) {storage}`: only a geometry stage taking triangles and \
+                         emitting a triangle strip is supported"
+                    )));
+                }
+                if let Some(p) = words.iter().position(|w| *w == "max_vertices") {
+                    max_vertices = words.get(p + 2).and_then(|n| n.parse::<u32>().ok());
                 }
                 blank(&mut gs_text, s.range.clone());
             }
@@ -301,6 +322,7 @@ fn combine(
             "EmitVertex" if called => gs_text[i] = "hz_emit".into(),
             "EndPrimitive" if called => gs_text[i] = "hz_end".into(),
             "gl_in" => gs_text[i] = "hz_gl_in".into(),
+            "gl_PrimitiveIDIn" => gs_text[i] = "hz_primitive".into(),
             "gl_Position" if prev.is_some_and(|j| gs_tokens[j] == ".") => gs_text[i] = "p".into(),
             "main" if called => gs_text[i] = "hz_gs_main".into(),
             _ => {}
@@ -378,7 +400,7 @@ fn combine(
     // Ours: before the geometry stage, its emission; after the vertex stage, `main`.
     let mut head = String::from(
         "void hz_emit(); void hz_end(); struct hz_PerVertex { vec4 p; }; hz_PerVertex hz_gl_in[3];\n\
-         int hz_n; int hz_strip; int hz_tri; int hz_want_tri; int hz_want_corner; bool hz_found; bool hz_primary;\n\
+         int hz_n; int hz_strip; int hz_tri; int hz_want_tri; int hz_want_corner; bool hz_found; bool hz_primary; int hz_primitive;\n\
          vec4 hz_ring_Position[3]; vec4 hz_res_Position; vec4 hz_vs_Position; int hz_vs_vertex;\n",
     );
     if chunk_fade.is_some() {
@@ -421,6 +443,7 @@ fn combine(
         "void main() {\n    uint hz_v = uint(gl_VertexIndex);\n    uint hz_first = hz_v / 3u * 3u;\n    \
          hz_want_corner = int(hz_v % 3u);\n    hz_want_tri = int(gl_InstanceIndex);\n    \
          hz_primary = hz_want_tri == 0 && hz_want_corner == 0;\n    \
+         hz_primitive = int(hz_v / 3u);\n    \
          for (int hz_i = 0; hz_i < 3; hz_i++) {\n",
     );
     writeln!(
@@ -605,7 +628,7 @@ mod tests {
     use crate::{Macros, Pack, preprocess};
 
     /// `vsh`, `gsh` and `fsh` (a pack's shadow program) folded and translated.
-    fn fold(vsh: &str, gsh: &str, fsh: &str) -> Result<(Program, u32), Vec<Error>> {
+    fn fold(vsh: &str, gsh: &str, fsh: &str, shadow: bool) -> Result<(Program, u32), Vec<Error>> {
         let pack = Pack::from_zip_bytes(
             "P.zip",
             zip(&[
@@ -634,6 +657,7 @@ mod tests {
             &pp("shadow.gsh"),
             &pp("shadow.fsh"),
             &inputs,
+            shadow,
         )
     }
 
@@ -648,7 +672,7 @@ mod tests {
                    gl_Position = gl_in[i].gl_Position;\n        EmitVertex();\n    }\n    \
                    gl_Position = vec4(vPos[0], 1.0);\n    EmitVertex();\n    EndPrimitive();\n}\n";
         let fsh = "#version 430\nin vec4 gColor;\nvoid main() {\n    gl_FragData[0] = gColor;\n}\n";
-        let (program, triangles) = fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+        let (program, triangles) = fold(vsh, gsh, fsh, true).unwrap_or_else(|e| panic!("{e:?}"));
         // A strip of four corners is two triangles.
         assert_eq!(triangles, 2);
         assert_eq!(program.vertex.entry_points.len(), 1);
@@ -675,7 +699,7 @@ mod tests {
         let fsh = "#version 430\nuniform float far;\n\
                    in VertexData {\n    vec4 color;\n    flat float id;\n} gIn;\n\
                    void main() {\n    gl_FragData[0] = gIn.color * gIn.id / far;\n}\n";
-        let (program, triangles) = fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+        let (program, triangles) = fold(vsh, gsh, fsh, true).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(triangles, 1);
         assert_eq!(program.fragment.entry_points.len(), 1);
     }
@@ -693,7 +717,61 @@ mod tests {
                    EndPrimitive();\n}\n";
         let fsh = "#version 430\nuniform float far;\nin float gDepth;\n\
                    void main() {\n    gl_FragData[0] = vec4(gDepth / far);\n}\n";
-        fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+        fold(vsh, gsh, fsh, true).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    /// A gbuffers program's geometry stage (`gbuffers_terrain.gsh`) draws from the player's
+    /// camera, and reads its input triangle's index (`gl_PrimitiveIDIn`); a shadow program's
+    /// draws from the shadow camera.
+    #[test]
+    fn gbuffers_programs_fold_with_the_players_matrices() {
+        let vsh = "#version 430\nuniform mat4 gbufferModelView;\nout vec2 vUv;\nvoid main() {\n    \
+                   vUv = gl_MultiTexCoord0.xy;\n    gl_Position = ftransform();\n}\n";
+        let gsh = "#version 430\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n\
+                   in vec2 vUv[];\nout vec2 gUv;\nflat out int gOdd;\nvoid main() {\n    \
+                   for (int i = 0; i < 3; i++) {\n        gUv = vUv[i];\n        \
+                   gOdd = gl_PrimitiveIDIn % 2;\n        \
+                   gl_Position = gl_in[i].gl_Position;\n        EmitVertex();\n    }\n    \
+                   EndPrimitive();\n}\n";
+        let fsh = "#version 430\nin vec2 gUv;\nflat in int gOdd;\n\
+                   void main() {\n    gl_FragData[0] = vec4(gUv, float(gOdd), 1.0);\n}\n";
+        let uniforms = |shadow| {
+            let (program, triangles) =
+                fold(vsh, gsh, fsh, shadow).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(triangles, 1);
+            program
+                .interface
+                .uniforms
+                .into_iter()
+                .map(|u| u.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(uniforms(false).iter().any(|n| n == "gbufferProjection"));
+        assert!(uniforms(true).iter().any(|n| n == "shadowProjection"));
+    }
+
+    /// Points and lines, in or out, are reported rather than drawn as triangles.
+    #[test]
+    fn only_triangles_in_and_strips_out_fold() {
+        let vsh = "#version 430\nvoid main() {\n    gl_Position = ftransform();\n}\n";
+        let fsh = "#version 430\nvoid main() {\n    gl_FragData[0] = vec4(1.0);\n}\n";
+        let body = "void main() {\n    gl_Position = gl_in[0].gl_Position;\n    EmitVertex();\n}\n";
+        for layouts in [
+            "layout(points) in;\nlayout(triangle_strip, max_vertices = 3) out;\n",
+            "layout(lines) in;\nlayout(triangle_strip, max_vertices = 3) out;\n",
+            "layout(triangles) in;\nlayout(line_strip, max_vertices = 3) out;\n",
+            "layout(triangles) in;\nlayout(points, max_vertices = 1) out;\n",
+        ] {
+            let gsh = format!("#version 430\n{layouts}{body}");
+            let Err(errors) = fold(vsh, &gsh, fsh, false) else {
+                panic!("{layouts}: folded")
+            };
+            assert!(
+                errors[0]
+                    .message
+                    .contains("only a geometry stage taking triangles")
+            );
+        }
     }
 
     #[test]

@@ -139,6 +139,7 @@ fn folded_geometry_keeps_source_vertex_ids_signed() {
             index: "uint(@)".into(),
             ..Default::default()
         },
+        true,
     )
     .unwrap_or_else(|errors| panic!("{errors:?}"));
     assert_eq!(triangles, 1);
