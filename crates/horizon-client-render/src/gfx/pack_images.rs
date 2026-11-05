@@ -38,12 +38,15 @@ impl PackImage {
     }
 }
 
-/// The images `image.*` declares; `packed_float`: this device stores into `Rg11b10Ufloat`
-/// (`format`).
-pub(super) fn images(defs: Vec<CustomImage>, packed_float: bool) -> Vec<PackImage> {
+/// The images `image.*` declares, each made in `backing` of its format; `packed_float`: this
+/// device stores into `Rg11b10Ufloat` (`format`).
+pub(super) fn images(
+    defs: Vec<CustomImage>, packed_float: bool,
+    backing: &dyn Fn(wgpu::TextureFormat) -> wgpu::TextureFormat,
+) -> Vec<PackImage> {
     defs.into_iter()
         .map(|def| PackImage {
-            format: format(def.format, packed_float),
+            format: backing(format(def.format, packed_float)),
             dimension: if def.is_1d() {
                 wgpu::TextureViewDimension::D1
             } else if def.is_3d() {
@@ -60,6 +63,256 @@ pub(super) fn images(defs: Vec<CustomImage>, packed_float: bool) -> Vec<PackImag
             made_for: [0; 2],
         })
         .collect()
+}
+
+/// The formats, in order, an image of `format` can be made in where the device can't both read
+/// and write `format` (Metal: no two-channel, 16-bit normalized, snorm or packed format): one
+/// of the same kind that holds its values in its channels or all four, then the 32-bit
+/// four-channel format of its kind. Its programs still see `format` (`widen_images`).
+pub(super) fn twins(format: wgpu::TextureFormat) -> [wgpu::TextureFormat; 2] {
+    use wgpu::TextureFormat as T;
+    let wide = match format.sample_type(None, None) {
+        Some(wgpu::TextureSampleType::Uint) => T::Rgba32Uint,
+        Some(wgpu::TextureSampleType::Sint) => T::Rgba32Sint,
+        _ => T::Rgba32Float,
+    };
+    let near = match format {
+        T::R8Snorm => T::R16Float,
+        T::Rg8Snorm | T::Rgba8Snorm | T::Rg16Float | T::Rg11b10Ufloat | T::Rgb10a2Unorm => {
+            T::Rgba16Float
+        }
+        T::R16Unorm | T::R16Snorm => T::R32Float,
+        T::Rg8Unorm => T::Rgba8Unorm,
+        T::Rg8Uint => T::Rgba8Uint,
+        T::Rg8Sint => T::Rgba8Sint,
+        T::Rg16Uint | T::Rgb10a2Uint => T::Rgba16Uint,
+        T::Rg16Sint => T::Rgba16Sint,
+        _ => wide,
+    };
+    [near, wide]
+}
+
+/// The storage format of a format `twins` gives.
+fn storage_format(format: wgpu::TextureFormat) -> Option<naga::StorageFormat> {
+    use naga::StorageFormat as S;
+    use wgpu::TextureFormat as T;
+    Some(match format {
+        T::R16Float => S::R16Float,
+        T::R32Float => S::R32Float,
+        T::Rgba8Unorm => S::Rgba8Unorm,
+        T::Rgba8Uint => S::Rgba8Uint,
+        T::Rgba8Sint => S::Rgba8Sint,
+        T::Rgba16Float => S::Rgba16Float,
+        T::Rgba16Uint => S::Rgba16Uint,
+        T::Rgba16Sint => S::Rgba16Sint,
+        T::Rgba32Float => S::Rgba32Float,
+        T::Rgba32Uint => S::Rgba32Uint,
+        T::Rgba32Sint => S::Rgba32Sint,
+        _ => return None,
+    })
+}
+
+/// What a store into an image of `declared` keeps of a value: the range its channels clamp to
+/// (normalized: [0, 1] or [-1, 1]; unsigned floats: 0 and up).
+fn store_range(declared: wgpu::TextureFormat) -> Option<(f32, Option<f32>)> {
+    use wgpu::TextureFormat as T;
+    match declared {
+        T::R8Unorm | T::Rg8Unorm | T::Rgba8Unorm | T::R16Unorm | T::Rg16Unorm => {
+            Some((0.0, Some(1.0)))
+        }
+        T::Rgba16Unorm | T::Rgb10a2Unorm => Some((0.0, Some(1.0))),
+        T::R8Snorm | T::Rg8Snorm | T::Rgba8Snorm | T::R16Snorm | T::Rg16Snorm => {
+            Some((-1.0, Some(1.0)))
+        }
+        T::Rgba16Snorm => Some((-1.0, Some(1.0))),
+        T::Rg11b10Ufloat => Some((0.0, None)),
+        _ => None,
+    }
+}
+
+/// How the stores into a widened image change their value.
+#[derive(Clone, Copy)]
+struct Widened {
+    scalar: naga::Scalar,
+    /// The declared format's channels when fewer than the four made: the rest store 0 (and w 1).
+    channels: Option<u8>,
+    range: Option<(f32, Option<f32>)>,
+}
+
+/// Has `module`'s storage images at `bindings` (set 0: binding, declared format, the format
+/// it is made in, one of its `twins`) declared in the format made, and their stores write what
+/// a store into the declared format reads back: its channels (the rest z = 0, w = 1), clamped
+/// to its range.
+// shortcut: stores are not quantized to the declared precision, and texels never stored (cleared
+// to zero) read w = 0 where the declared format reads 1; wrap loads if a pack depends on either.
+pub(super) fn widen_images(
+    module: &mut naga::Module,
+    bindings: &[(u32, wgpu::TextureFormat, wgpu::TextureFormat)],
+) {
+    use naga::{ImageClass, TypeInner};
+    let mut widened = Vec::new();
+    for (h, g) in module.global_variables.iter_mut() {
+        let Some(b) = g.binding.as_ref().filter(|b| b.group == 0) else {
+            continue;
+        };
+        let Some(&(_, declared, made)) = bindings.iter().find(|w| w.0 == b.binding) else {
+            continue;
+        };
+        let (Some(twin), false) = (storage_format(made), declared == made) else {
+            continue;
+        };
+        let TypeInner::Image {
+            dim,
+            arrayed,
+            class: ImageClass::Storage { access, .. },
+        } = module.types[g.ty].inner
+        else {
+            continue;
+        };
+        let scalar = match made.sample_type(None, None) {
+            Some(wgpu::TextureSampleType::Uint) => naga::Scalar::U32,
+            Some(wgpu::TextureSampleType::Sint) => naga::Scalar::I32,
+            _ => naga::Scalar::F32,
+        };
+        let (n, m) = (declared.components(), made.components());
+        let class = ImageClass::Storage {
+            format: twin,
+            access,
+        };
+        let inner = TypeInner::Image {
+            dim,
+            arrayed,
+            class,
+        };
+        let name = module.types[g.ty].name.clone();
+        g.ty = module
+            .types
+            .insert(naga::Type { name, inner }, naga::Span::UNDEFINED);
+        let channels = (m == 4 && n < 4).then_some(n);
+        let range = store_range(declared);
+        widened.push((
+            h,
+            Widened {
+                scalar,
+                channels,
+                range,
+            },
+        ));
+    }
+    if widened.is_empty() {
+        return;
+    }
+    let functions = (module.functions.iter_mut().map(|(_, f)| f))
+        .chain(module.entry_points.iter_mut().map(|e| &mut e.function));
+    for f in functions {
+        let body = std::mem::take(&mut f.body);
+        f.body = widen_stores(body, &mut f.expressions, &mut module.types, &widened);
+    }
+}
+
+/// `block` with each store into one of `widened`'s images storing its value as `Widened` says.
+fn widen_stores(
+    block: naga::Block,
+    expressions: &mut naga::Arena<naga::Expression>,
+    types: &mut naga::UniqueArena<naga::Type>,
+    widened: &[(naga::Handle<naga::GlobalVariable>, Widened)],
+) -> naga::Block {
+    use naga::{Expression as E, Statement as St};
+    let mut out = naga::Block::new();
+    let inner = |b: &mut naga::Block,
+                 expressions: &mut naga::Arena<naga::Expression>,
+                 types: &mut naga::UniqueArena<naga::Type>| {
+        *b = widen_stores(std::mem::take(b), expressions, types, widened);
+    };
+    for (mut statement, span) in block.span_into_iter() {
+        match &mut statement {
+            St::Block(b) => inner(b, expressions, types),
+            St::If { accept, reject, .. } => {
+                inner(accept, expressions, types);
+                inner(reject, expressions, types);
+            }
+            St::Switch { cases, .. } => {
+                for c in cases {
+                    inner(&mut c.body, expressions, types);
+                }
+            }
+            St::Loop {
+                body, continuing, ..
+            } => {
+                inner(body, expressions, types);
+                inner(continuing, expressions, types);
+            }
+            St::ImageStore { image, value, .. } => {
+                let w = match expressions[*image] {
+                    E::GlobalVariable(g) => widened.iter().find(|w| w.0 == g).map(|w| w.1),
+                    _ => None,
+                };
+                if let Some(w) = w {
+                    let literal = |v: f32| match w.scalar.kind {
+                        naga::ScalarKind::Uint => naga::Literal::U32(v as u32),
+                        naga::ScalarKind::Sint => naga::Literal::I32(v as i32),
+                        _ => naga::Literal::F32(v),
+                    };
+                    // Literals are in scope without an `Emit`: they go first, then the
+                    // expressions emitted as one range.
+                    let mut lit = |v: f32| expressions.append(E::Literal(literal(v)), span);
+                    let (zero, one) = (lit(0.0), lit(1.0));
+                    let range = w.range.map(|(lo, hi)| (lit(lo), hi.map(&mut lit)));
+                    let first = expressions.len();
+                    let ty = types.insert(
+                        naga::Type {
+                            name: None,
+                            inner: naga::TypeInner::Vector {
+                                size: naga::VectorSize::Quad,
+                                scalar: w.scalar,
+                            },
+                        },
+                        naga::Span::UNDEFINED,
+                    );
+                    let mut wide = *value;
+                    if let Some(n) = w.channels {
+                        let mut components: Vec<_> = (0..u32::from(n))
+                            .map(|index| {
+                                expressions.append(E::AccessIndex { base: wide, index }, span)
+                            })
+                            .collect();
+                        components.resize(3, zero);
+                        components.push(one);
+                        wide = expressions.append(E::Compose { ty, components }, span);
+                    }
+                    if let Some((lo, hi)) = range {
+                        let mut splat = |value| {
+                            let size = naga::VectorSize::Quad;
+                            expressions.append(E::Splat { size, value }, span)
+                        };
+                        let (lo, hi) = (splat(lo), hi.map(&mut splat));
+                        let fun = match hi {
+                            Some(_) => naga::MathFunction::Clamp,
+                            None => naga::MathFunction::Max,
+                        };
+                        wide = expressions.append(
+                            E::Math {
+                                fun,
+                                arg: wide,
+                                arg1: Some(lo),
+                                arg2: hi,
+                                arg3: None,
+                            },
+                            span,
+                        );
+                    }
+                    if expressions.len() > first {
+                        let range = expressions.range_from(first);
+                        out.push(St::Emit(range), span);
+                        *value = wide;
+                    }
+                }
+            }
+            _ => {}
+        }
+        out.push(statement, span);
+    }
+    out
 }
 
 /// The texture dimension a view of `view` needs.
@@ -622,6 +875,92 @@ impl Dump {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Images made in a twin of their format (Metal reads and writes neither `rg32ui` nor `r16`):
+    /// the module declares the twin and still validates; a store into the `rg32ui` image (here
+    /// inside an `if`) writes x and y with z = 0, w = 1, one into the `r16` image clamps to
+    /// [0, 1], and an image made in its own format is left alone.
+    #[test]
+    fn a_widened_image_stores_what_its_format_keeps() {
+        use wgpu::TextureFormat as T;
+        let glsl = "#version 450\nlayout(local_size_x = 1) in;\n\
+                    layout(set = 0, binding = 1, rg32ui) uniform uimage2D wide;\n\
+                    layout(set = 0, binding = 2, rg32ui) uniform uimage2D kept;\n\
+                    layout(set = 0, binding = 3, r16) uniform image2D unorm;\n\
+                    void main() {\n    uvec4 v = imageLoad(wide, ivec2(0)) + imageLoad(kept, ivec2(0));\n    \
+                    if (v.x == 0u) { imageStore(wide, ivec2(1), uvec4(7u, 8u, 9u, 10u)); }\n    \
+                    imageStore(kept, ivec2(1), v);\n    \
+                    imageStore(unorm, ivec2(1), imageLoad(unorm, ivec2(0)) * 2.0);\n}\n";
+        let options = naga::front::glsl::Options::from(naga::ShaderStage::Compute);
+        let mut module = naga::front::glsl::Frontend::default()
+            .parse(&options, glsl)
+            .expect("parses");
+        widen_images(
+            &mut module,
+            &[
+                (1, T::Rg32Uint, T::Rgba32Uint),
+                (2, T::Rg32Uint, T::Rg32Uint),
+                (3, T::R16Unorm, T::R32Float),
+            ],
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("validates");
+        let format = |binding: u32| {
+            let (_, g) = (module.global_variables.iter())
+                .find(|(_, g)| g.binding.as_ref().is_some_and(|b| b.binding == binding))
+                .expect("declared");
+            match module.types[g.ty].inner {
+                naga::TypeInner::Image {
+                    class: naga::ImageClass::Storage { format, .. },
+                    ..
+                } => format,
+                _ => panic!("not a storage image"),
+            }
+        };
+        use naga::StorageFormat as S;
+        assert_eq!(
+            [1, 2, 3].map(format),
+            [S::Rgba32Uint, S::Rg32Uint, S::R32Float]
+        );
+        // What each store's value is: as written, filled out (its last two components'
+        // literals), or clamped.
+        // The GLSL front puts `main` in a function the entry point calls.
+        let (_, f) = module.functions.iter().next().expect("main");
+        let mut stored = Vec::new();
+        let mut blocks = vec![&f.body];
+        while let Some(block) = blocks.pop() {
+            for s in block.iter() {
+                match s {
+                    naga::Statement::If { accept, reject, .. } => blocks.extend([accept, reject]),
+                    naga::Statement::Block(b) => blocks.push(b),
+                    naga::Statement::ImageStore { value, .. } => {
+                        stored.push(match &f.expressions[*value] {
+                            naga::Expression::Compose { components, .. } => {
+                                let literals =
+                                    components[2..].iter().map(|&c| match f.expressions[c] {
+                                        naga::Expression::Literal(naga::Literal::U32(u)) => u,
+                                        _ => u32::MAX,
+                                    });
+                                format!("filled {:?}", literals.collect::<Vec<_>>())
+                            }
+                            naga::Expression::Math {
+                                fun: naga::MathFunction::Clamp,
+                                ..
+                            } => "clamped".to_owned(),
+                            _ => "as written".to_owned(),
+                        })
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stored.sort();
+        assert_eq!(stored, ["as written", "clamped", "filled [0, 1]"]);
+    }
 
     /// A buffer the pack declares smaller than a shader's block grows to the block (40 bytes
     /// bound as a 48-byte block failed wgpu's validation, #7178); a larger one keeps its size.

@@ -320,6 +320,28 @@ fn image_buffers(images: &[(u32, Image)]) -> u16 {
         .fold(0, |m, b| m | 1 << b)
 }
 
+/// The pack images (and stand-ins) `images` binds in another format than their declared one
+/// (`Gpu::backing`): binding, declared format, format made.
+fn image_formats(
+    images: &[(u32, Image)],
+    interface: &horizon_shaders::Interface,
+    pack: &Resources<'_>,
+) -> Vec<(u32, wgpu::TextureFormat, wgpu::TextureFormat)> {
+    images
+        .iter()
+        .filter_map(|&(binding, image)| {
+            let made = match image {
+                Image::Custom(k) | Image::CustomBefore(k) => pack.images[k].format,
+                Image::StandIn(format, _) => format,
+                _ => return None,
+            };
+            let declared = interface.images.iter().find(|i| i.binding == binding)?;
+            let declared = image_format(&declared.format)?;
+            (declared != made).then_some((binding, declared, made))
+        })
+        .collect()
+}
+
 /// The shadowcolor buffers of `images` outside the shadow buffers' programs, as a mask.
 fn shadow_images(images: &[(u32, Image)]) -> u16 {
     images.iter().fold(0, |m, i| match i.1 {
@@ -387,6 +409,37 @@ impl Gpu {
         };
         (self.compute || self.fragment_storage)
             && usages.contains(wgpu::TextureUsages::STORAGE_BINDING)
+    }
+
+    /// Whether images of `format` can be both read and written.
+    fn read_write(
+        self,
+        adapter: &wgpu::Adapter,
+        format: wgpu::TextureFormat,
+        features: wgpu::Features,
+    ) -> bool {
+        let flags = if self.adapter_formats {
+            adapter.get_texture_format_features(format).flags
+        } else {
+            format.guaranteed_format_features(features).flags
+        };
+        flags.contains(wgpu::TextureFormatFeatureFlags::STORAGE_READ_WRITE)
+    }
+
+    /// The format a pack image of `format` is made in: `format` when this device can read and
+    /// write it, else the first of its `pack_images::twins` it can.
+    fn backing(
+        self,
+        adapter: &wgpu::Adapter,
+        format: wgpu::TextureFormat,
+        features: wgpu::Features,
+    ) -> wgpu::TextureFormat {
+        if self.read_write(adapter, format, features) {
+            return format;
+        }
+        (pack_images::twins(format).into_iter())
+            .find(|&t| self.read_write(adapter, t, features))
+            .unwrap_or(format)
     }
 
     /// The stages that may bind images and storage buffers.
@@ -1331,6 +1384,8 @@ struct Resources<'a> {
     /// be bound as an image.
     shadow_colors: u16,
     shadow_storable: u16,
+    /// The format a pack image of a format is made in (`Gpu::backing`).
+    backing: &'a dyn Fn(wgpu::TextureFormat) -> wgpu::TextureFormat,
     /// The buffers of a three-channel format (`rgb`): they have no alpha to write, and read 1.
     rgb: u16,
     /// The bits per channel a buffer of a small packed format keeps ([`packed::bits`]).
@@ -1786,10 +1841,13 @@ fn bindings(
     for i in &interface.images {
         let buffer = buffer_image(&i.name);
         let own = pack.images.iter().position(|c| c.def.name == i.name);
-        let Some(format) = image_format(&i.format) else {
+        let Some(declared) = image_format(&i.format) else {
             notes.push(format!("{name}: `{}` has format {}", i.name, i.format));
             return None;
         };
+        // A pack image of a format this device can't both read and write is made in a twin
+        // (`pack_images::twins`), and the program's declaration follows.
+        let backed = (pack.backing)(declared);
         let dimension = if i.ty.ends_with("1D") {
             wgpu::TextureViewDimension::D1
         } else if i.ty.ends_with("3D") {
@@ -1804,17 +1862,17 @@ fn bindings(
                 "{name}: image `{of}` has no `image.{of}`; it reads zero"
             ));
             let mut stand_ins = pack.stand_ins.borrow_mut();
-            if !stand_ins.contains(&(format, dimension)) {
-                stand_ins.push((format, dimension));
+            if !stand_ins.contains(&(backed, dimension)) {
+                stand_ins.push((backed, dimension));
             }
-            (Image::StandIn(format, dimension), format)
+            (Image::StandIn(backed, dimension), backed)
         };
         let (target, actual) = match (buffer, own) {
             (_, Some(k)) => (Image::Custom(k), pack.images[k].format),
             (Some(Image::ShadowColor(n)), None) => {
-                (Image::ShadowColor(n), shadow.map_or(format, |f| f[n]))
+                (Image::ShadowColor(n), shadow.map_or(declared, |f| f[n]))
             }
-            (Some(b), None) => (b, b.buffer().map_or(format, |b| formats[b])),
+            (Some(b), None) => (b, b.buffer().map_or(declared, |b| formats[b])),
             (None, None) if i.before.is_some() => {
                 // Bound as the image it copies. The shadow buffers have no copies.
                 let of = i.before.as_deref().unwrap_or_default();
@@ -1831,11 +1889,15 @@ fn bindings(
             }
             (None, None) => stand_in(&i.name, notes),
         };
+        let format = match target {
+            Image::Color(_) | Image::ShadowColor(_) | Image::ColorBefore(_) => declared,
+            _ => backed,
+        };
         // An `R11F_G11F_B10F` image or buffer this device makes `RGBA16F` (a float stand-in
         // that neither clamps nor drops NaN) takes `layout(r11f_g11f_b10f)` as `rgba16f`
         // (`storage_formats_of`): Iris 1.11.7 stored into and read back such an image with a
         // probe pack of ours (#10490), where Horizon refused the program.
-        let stand_in = format == wgpu::TextureFormat::Rg11b10Ufloat
+        let stand_in = declared == wgpu::TextureFormat::Rg11b10Ufloat
             && actual == wgpu::TextureFormat::Rgba16Float;
         if actual != format && !stand_in {
             notes.push(format!(
@@ -2072,6 +2134,7 @@ fn build_pass(
         });
         let module = |mut m: naga::Module| {
             share_samplers(&mut m, &slots);
+            pack_images::widen_images(&mut m, &image_formats(&images, interface, pack));
             storage_formats_of(&mut m, &entries);
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&p.name),
@@ -2304,6 +2367,7 @@ fn build_compute(
         });
         let mut module = c.module;
         share_samplers(&mut module, &slots);
+        pack_images::widen_images(&mut module, &image_formats(&images, interface, pack));
         storage_formats_of(&mut module, &entries);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&name),
@@ -2546,16 +2610,13 @@ impl PackPost {
             notes.push("this GPU has no compute shaders: compute programs are skipped".into());
         }
         // An image this device can't make or store into: the programs using it are skipped.
+        let backing = |f| gpu.backing(adapter, f, features);
         let mut image_defs = std::mem::take(&mut post.images);
         let mut left_out = Vec::new();
         let packed_float = gpu.storable(adapter, wgpu::TextureFormat::Rg11b10Ufloat, features);
         image_defs.retain(|def| {
             let made = pack_images::makeable(device, def, packed_float).and_then(|()| {
-                if gpu.storable(
-                    adapter,
-                    pack_images::format(def.format, packed_float),
-                    features,
-                ) {
+                if gpu.storable(adapter, backing(pack_images::format(def.format, packed_float)), features) {
                     Ok(())
                 } else {
                     Err("this GPU can't store into its format".into())
@@ -2577,7 +2638,7 @@ impl PackPost {
             ));
             left_out.push(def);
         }
-        let images = pack_images::images(image_defs, packed_float);
+        let images = pack_images::images(image_defs, packed_float, &backing);
         let mut objects = std::mem::take(&mut post.buffer_objects);
         if gpu.storage_stages().is_empty() {
             objects.clear();
@@ -2611,6 +2672,7 @@ impl PackPost {
             gpu,
             storable,
             shadow_colors,
+            backing: &backing,
             shadow_storable: shadow_formats.map_or(0, |f| {
                 (0..SHADOW_COLORS)
                     .filter(|&n| gpu.storable(adapter, f[n], features))
@@ -6134,6 +6196,7 @@ mod tests {
             storable: 0,
             shadow_colors: 0,
             shadow_storable: 0,
+            backing: &|f| f,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
@@ -6238,6 +6301,7 @@ mod tests {
             packed: [None; BUFFERS],
             shadow_colors: 0,
             shadow_storable: 0,
+            backing: &|f| f,
         };
         let (_, samplers, ..) = bindings(
             device.features(),
@@ -6317,6 +6381,7 @@ mod tests {
             storable: 0,
             shadow_colors: 0,
             shadow_storable: 0,
+            backing: &|f| f,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
@@ -6462,6 +6527,7 @@ mod tests {
             storable: 0,
             shadow_colors: 0,
             shadow_storable: 0,
+            backing: &|f| f,
             rgb: 0,
             packed: [None; BUFFERS],
             released: std::cell::Cell::new(("", 0)),
