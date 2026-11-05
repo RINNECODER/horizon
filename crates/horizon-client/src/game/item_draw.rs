@@ -474,6 +474,16 @@ impl Game<'_> {
         let lights = diffuse_lights(self.nether_lighting());
         self.submit_item_lit(state, pose, light, lights, out);
     }
+    /// The diffuse lights an item's colour is shaded by: none for an item that glows in HDR,
+    /// nor under a shader pack, whose programs replace the entity shaders that shade it in vanilla
+    /// and light it themselves from `gl_Normal` (shading it here too darkened it twice).
+    fn item_lights(
+        &self,
+        state: &ItemRenderState,
+        lights: (glam::Vec3, glam::Vec3),
+    ) -> Option<(glam::Vec3, glam::Vec3)> {
+        (state.hdr_light == 0 && self.pack_ids.is_none()).then_some(lights)
+    }
     /// [`Self::submit_item_world`] shaded by other diffuse lights (a
     /// `Lighting.Entry` other than the level's), in the pose's output space.
     pub(super) fn submit_item_lit(
@@ -487,7 +497,7 @@ impl Game<'_> {
         let mut sink = WorldSink {
             out,
             light: item_hdr_light(state, light),
-            lights: (state.hdr_light == 0).then_some(lights),
+            lights: self.item_lights(state, lights),
             glint: self.glint(),
             tier: state.hdr_tier,
         };
@@ -557,7 +567,7 @@ impl Game<'_> {
     ) -> bool {
         let sink = (
             item_hdr_light(state, light),
-            (state.hdr_light == 0).then_some(lights),
+            self.item_lights(state, lights),
             state.hdr_tier,
         );
         let renderer = &self.pack.item_renderer;
