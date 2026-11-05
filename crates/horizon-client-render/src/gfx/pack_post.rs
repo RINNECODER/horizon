@@ -22,7 +22,7 @@ use horizon_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 use smallvec::SmallVec;
 
 use super::pack_draw::DrawUniforms;
-use super::pack_entities::{PROGRAMS, PackEntities};
+use super::pack_entities::{BEAM, PROGRAMS, PackEntities};
 use super::pack_images;
 use super::pack_sky::PackSky;
 use super::pack_textures;
@@ -1274,6 +1274,21 @@ pub(super) struct Geometry<'a> {
     pub ids: Option<&'a wgpu::BindGroupLayout>,
     /// Back faces are culled, as for the game's own terrain.
     pub cull: bool,
+}
+
+impl Geometry<'_> {
+    /// The same geometry, not culled, writing depth or not.
+    fn with_depth(&self, depth_write: bool) -> Self {
+        Self {
+            buffers: self.buffers,
+            table: self.table,
+            depth_write,
+            atlas: self.atlas.clone(),
+            material_maps: self.material_maps,
+            ids: self.ids,
+            cull: false,
+        }
+    }
 }
 
 /// What a pack brings besides its programs: custom textures, images and storage buffers.
@@ -2753,7 +2768,9 @@ impl PackPost {
             post.translucent_late,
             post.particles_late,
             false,
-            true,
+            // Beams blend like translucent entity parts, before deferred by default: only
+            // weather, water and the translucent hand draw after it.
+            post.translucent_late,
             post.translucent_late,
             true,
         ];
@@ -2779,23 +2796,16 @@ impl PackPost {
                 pass
             })
         };
+        let mut programs = programs;
+        let beam = programs[BEAM].take();
         let mut kind = 0;
-        let entity_passes = programs.map(|p| {
+        let mut entity_passes = programs.map(|p| {
             // The entity program draws the boats, and their water patches (`Draw::water_mask`).
             water_mask_next.set(kind == super::pack_entities::ENTITY);
             kind += 1;
             p.zip(entity_geometry.as_ref()).and_then(|(p, g)| {
                 if p.name == "gbuffers_damagedblock" {
-                    let decal = Geometry {
-                        buffers: g.buffers,
-                        table: g.table,
-                        depth_write: false,
-                        atlas: g.atlas.clone(),
-                        material_maps: g.material_maps,
-                        ids: g.ids,
-                        cull: false,
-                    };
-                    paged(build(p, Some(&decal)))
+                    paged(build(p, Some(&g.with_depth(false))))
                 } else {
                     paged(build(p, Some(g)))
                 }
@@ -2807,6 +2817,12 @@ impl PackPost {
             late[super::pack_entities::PARTICLE] = false;
         }
         water_mask_next.set(false);
+        // Beams write depth only when the pack asks (`beacon.beam.depth`).
+        // shortcut: the glow writes depth with the inner beam then (the format says the inner
+        // beam only); split the glow into a pass of its own if a pack's translucents show it.
+        entity_passes[BEAM] = beam
+            .zip(entity_geometry.as_ref())
+            .and_then(|(p, g)| paged(build(p, Some(&g.with_depth(post.beam_depth)))));
         let shadow_entities = shadow_programs.map(|p| {
             p.zip(entity_geometry.as_ref())
                 .and_then(|(p, g)| paged(build(p, Some(g))))
