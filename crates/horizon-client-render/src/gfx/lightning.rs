@@ -18,6 +18,9 @@ pub struct Input<'a> {
     /// Current atlas white texel ([`white_uv`]); a changed rect invalidates
     /// retained vertices.
     pub uv: [f32; 2],
+    /// The bolts' `entityId` for a shader pack (`minecraft:lightning_bolt` in its
+    /// `entity.properties`).
+    pub entity_id: i32,
 }
 
 /// The atlas point an untextured quad (`RenderTypes.lightning` has no
@@ -147,6 +150,19 @@ impl<T> Cache<T> {
 
 fn offset(bolt: &Bolt, camera: DVec3) -> [f32; 3] {
     (DVec3::from_array(bolt.at) - camera).as_vec3().to_array()
+}
+
+/// The bolts for a shader pack's `gbuffers_lightning`, appended to `out` in camera space as the
+/// entities' vertices are: untextured (the white texel), at full light, with no overlay.
+pub(super) fn pack_vertices(input: &Input<'_>, camera: DVec3, out: &mut Vec<Vertex>) {
+    for bolt in input.bolts {
+        let at = glam::Vec3::from(offset(bolt, camera));
+        out.extend(geometry(bolt.seed, input.uv).into_iter().map(|mut v| {
+            v.pos = (at + glam::Vec3::from(v.pos)).to_array();
+            v.layer = 0;
+            v
+        }));
+    }
 }
 
 pub(super) struct Renderer {

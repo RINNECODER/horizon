@@ -154,6 +154,7 @@ fn cache_tracks_seed_lifecycle_movement_and_atlas_reload() {
         Input {
             bolts,
             uv: [0.25, 0.5],
+            ..Default::default()
         }
     }
     cache.prepare(&input(&bolts), build);
@@ -180,6 +181,7 @@ fn cache_tracks_seed_lifecycle_movement_and_atlas_reload() {
         &Input {
             bolts: &bolts,
             uv: [0.75, 0.25],
+            ..Default::default()
         },
         build,
     );
@@ -201,6 +203,7 @@ fn long_flash_sequence_keeps_only_active_seeds() {
             &Input {
                 bolts: &[Bolt { seed, at: [0.0; 3] }],
                 uv: [0.0; 2],
+                ..Default::default()
             },
             |seed, _| seed,
         );
@@ -405,6 +408,7 @@ fn retained_gpu_draw_matches_transient_additive_draw() {
         let input = Input {
             bolts: &bolts[..if frame == 3 { 1 } else { 3 }],
             uv: if frame == 3 { [0.75; 2] } else { [0.5; 2] },
+            ..Default::default()
         };
         let expected: Vec<_> = input
             .bolts
@@ -676,7 +680,11 @@ fn bolt_through_the_atlas_white_sprite_is_fully_drawn() {
             seed: 123,
             at: [0.0, -1.62, 14.0],
         }];
-        let input = Input { bolts: &bolts, uv };
+        let input = Input {
+            bolts: &bolts,
+            uv,
+            ..Default::default()
+        };
         let mut renderer = Renderer::new();
         let mut uploads = Uploads::new(&device);
         let mut encoder = device.create_command_encoder(&Default::default());

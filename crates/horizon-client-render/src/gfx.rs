@@ -9269,15 +9269,35 @@ impl Renderer {
         // While a shader pack draws entities, the runs of `entity_spans` its programs draw are
         // left out of Horizon's own entity draw.
         let mut entities = frame.entities;
+        // Lightning bolts a pack draws (`gbuffers_lightning`) join its entity runs, one run of
+        // their own after the others; Horizon then draws none.
+        let mut pack_lightning = false;
         if !frame.title
             && let Some((_, Some(post))) = &mut self.pack_post
             && post.has_entities()
         {
+            pack_lightning = post.draws_lightning() && !frame.lightning.bolts.is_empty();
+            let with_bolts = pack_lightning.then(|| {
+                let mut vertices = frame.entities.to_vec();
+                let mut spans = frame.entity_spans.to_vec();
+                spans.push(pack_draw::EntitySpan {
+                    start: vertices.len() as u32,
+                    stage: horizon_shaders::render_stage("ENTITIES"),
+                    id: frame.lightning.entity_id,
+                    lightning: true,
+                    ..Default::default()
+                });
+                lightning::pack_vertices(&frame.lightning, camera, &mut vertices);
+                (vertices, spans)
+            });
+            let (list, spans) = with_bolts
+                .as_ref()
+                .map_or((frame.entities, frame.entity_spans), |(v, s)| (v, s));
             post.prepare_entities(
                 &self.device,
                 &self.queue,
-                frame.entities,
-                frame.entity_spans,
+                list,
+                spans,
                 frame.crumbling_sprite,
                 frame.end_portal_sprites[1],
                 &mut self.pack_entity_rest,
@@ -9387,11 +9407,17 @@ impl Renderer {
         } else {
             0
         };
+        // No bolts kept when the pack draws them: Horizon's lightning draws then draw nothing.
+        let no_bolts = lightning::Input::default();
         self.lightning.prepare(
             &self.device,
             &mut self.uploads,
             &mut encoder,
-            &frame.lightning,
+            if pack_lightning {
+                &no_bolts
+            } else {
+                &frame.lightning
+            },
             camera,
         );
         // Frame generation's made frame draws its own hand, halfway, after the others.

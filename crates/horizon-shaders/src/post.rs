@@ -237,6 +237,19 @@ const ARMOR_GLINT: [&str; 3] = [
     "gbuffers_basic",
 ];
 
+/// `gbuffers_lightning` and its fallbacks (the shaders.properties reference's Iris additional
+/// programs): lightning bolts.
+const LIGHTNING: [&str; 5] = [
+    "gbuffers_lightning",
+    "gbuffers_entities",
+    "gbuffers_textured_lit",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
+/// Vanilla's lightning blend (`BlendFunction.LIGHTNING`): added, scaled by its alpha.
+pub const LIGHTNING_BLEND: Blend = [Factor::SrcAlpha, Factor::One, Factor::SrcAlpha, Factor::One];
+
 /// Vanilla's glint blend (`BlendFunction.GLINT`): the glint's colour, scaled by itself, added.
 pub const GLINT_BLEND: Blend = [Factor::SrcColor, Factor::One, Factor::Zero, Factor::One];
 
@@ -519,6 +532,9 @@ pub struct Post {
     /// What draws beacon and End gateway beams: blended, with the translucent entity parts
     /// (before deferred unless `separateEntityDraws`).
     pub beacon_beam: Option<PostProgram>,
+    /// What draws lightning bolts: added (vanilla's blend), before deferred, with the
+    /// entities.
+    pub lightning: Option<PostProgram>,
     pub damaged_block: Option<PostProgram>,
     /// What draws the game's clouds.
     pub clouds: Option<PostProgram>,
@@ -608,6 +624,7 @@ impl Post {
             &self.hand_glint,
             &self.hand_water,
             &self.block_translucent,
+            &self.lightning,
             &self.shadow,
             &self.shadow_water,
             &self.shadow_entities,
@@ -775,6 +792,7 @@ pub fn load_post(
         armor_glint: None,
         hand_glint: None,
         beacon_beam: None,
+        lightning: None,
         damaged_block: None,
         clouds: None,
         lines: None,
@@ -989,6 +1007,12 @@ pub fn load_post(
     let (item_glint, armor_glint) = (glint(inputs.glint.as_ref()), glint(inputs.glint.as_ref()));
     let hand_glint = glint(inputs.hand_glint.as_ref());
     let beacon_beam = translucent(&BEACON_BEAM, 0.0, &mut gbuffers_dyn);
+    // Lightning draws before deferred (not among the programs after it) and adds itself, as
+    // vanilla's does, unless `blend.*` says otherwise.
+    let lightning = translucent(&LIGHTNING, 0.0, &mut gbuffers_dyn).map(|mut p| {
+        p.blend = blend(properties, &p.name).unwrap_or(Some(LIGHTNING_BLEND));
+        p
+    });
     // Clouds blend, as vanilla's do (OQ-23).
     let clouds = inputs
         .clouds
@@ -1151,6 +1175,7 @@ pub fn load_post(
     loader.post.armor_glint = armor_glint;
     loader.post.hand_glint = hand_glint;
     loader.post.beacon_beam = beacon_beam;
+    loader.post.lightning = lightning;
     loader.post.damaged_block = damaged_block;
     loader.post.clouds_off = properties.get("clouds").is_some_and(|v| v.trim() == "off");
     loader.post.clouds = clouds.filter(|_| !loader.post.clouds_off);
@@ -1202,6 +1227,7 @@ fn load_shadow(
         &post.particles,
         &post.particles_translucent,
         &post.beacon_beam,
+        &post.lightning,
         &post.damaged_block,
         &post.clouds,
         &post.weather,
@@ -3472,6 +3498,12 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         assert_eq!(
             (post.beacon_beam.as_ref().unwrap().blend, post.beam_depth),
             (Some(TRANSLUCENT_BLEND), false)
+        );
+        // Lightning falls back through the entities' chain and adds itself, as vanilla's does.
+        let lightning = post.lightning.as_ref().unwrap();
+        assert_eq!(
+            (lightning.name.as_str(), lightning.blend),
+            ("gbuffers_textured", Some(LIGHTNING_BLEND))
         );
         // Clouds fall back to gbuffers_textured, blended.
         let clouds = post.clouds.as_ref().unwrap();

@@ -633,15 +633,23 @@ impl Game<'_> {
         self.mark_entity_part(start, name, true);
     }
 
+    /// The `entityId` of entity type `name` while entity runs are marked; `None` otherwise.
+    pub(super) fn span_entity_id(&self, name: &str) -> Option<i32> {
+        match &self.pack_ids {
+            Some(ids) => Some(
+                ids.entities
+                    .get(name)
+                    .copied()
+                    .unwrap_or(ids.missing_entity),
+            ),
+            None if native_spans() => Some(name_id(name)),
+            None => None,
+        }
+    }
+
     fn mark_entity_part(&self, start: usize, name: &str, translucent: bool) {
-        let id = match &self.pack_ids {
-            Some(ids) => ids
-                .entities
-                .get(name)
-                .copied()
-                .unwrap_or(ids.missing_entity),
-            None if native_spans() => name_id(name),
-            None => return,
+        let Some(id) = self.span_entity_id(name) else {
+            return;
         };
         self.push_span(start, "ENTITIES", id);
         if let Some(last) = self.entity_spans.borrow_mut().last_mut() {

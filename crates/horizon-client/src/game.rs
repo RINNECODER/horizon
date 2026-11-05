@@ -9702,6 +9702,7 @@ impl Game<'_> {
             lightning: horizon_client::gfx::lightning::Input {
                 bolts: &bolts,
                 uv: horizon_client::gfx::lightning::white_uv(&self.gui.atlas.font.white()),
+                entity_id: self.span_entity_id("minecraft:lightning_bolt").unwrap_or(0),
             },
             additive: &additive,
             see_through: &see_through,
