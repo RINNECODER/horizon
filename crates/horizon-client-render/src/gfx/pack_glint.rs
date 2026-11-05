@@ -28,6 +28,14 @@ pub fn glint(overlay: u32) -> Glint {
     }
 }
 
+/// Whether a quad is drawn from the translucent item sheet (`ITEM_TRANSLUCENT`).
+pub fn translucent_item(overlay: u32) -> bool {
+    matches!(
+        overlay & 0xffff,
+        super::TRANSLUCENT_ITEM_OVERLAY | super::TRANSLUCENT_GLINT_ITEM_OVERLAY
+    )
+}
+
 /// `count` quads from quad `first` of `vertices`, cut where `kind` of a quad's overlay changes:
 /// (first quad, quads, kind) of each part.
 pub fn split<K: PartialEq + Copy>(

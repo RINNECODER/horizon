@@ -482,13 +482,23 @@ impl PackEntities {
                 if !pack && !casts {
                     continue;
                 }
+                // A posed eyes layer goes to its own program, casting as the body does.
+                let own = if pack {
+                    own_program(program, overlay, drawn)
+                } else {
+                    program
+                };
+                let (at, n) = (range.start, range.len() as u32);
+                if own != program && casts {
+                    self.push_draw(span, at, n, program, false, true, overlay, false, false);
+                }
                 self.push_draw(
                     span,
-                    range.start,
-                    range.len() as u32,
-                    program,
+                    at,
+                    n,
+                    own,
                     pack,
-                    casts,
+                    casts && own == program,
                     overlay,
                     false,
                     false,
@@ -627,18 +637,36 @@ impl PackEntities {
                 }
                 let vertices = self.scratch.len() as u32 - start;
                 let portal = part == Part::Portal;
-                let overlay = self.scratch[start as usize].layer & 0xffff;
-                self.push_draw(
-                    span,
-                    posed + start,
-                    vertices,
-                    program,
-                    pack,
-                    casts,
-                    overlay,
-                    portal,
-                    part == Part::WaterMask,
-                );
+                // Translucent particles, translucent items and eyes go to their own program
+                // (`own_program`); they still cast as the run does.
+                let pieces = if part == Part::Plain && pack {
+                    pack_glint::split(&self.scratch, start / 4, vertices / 4, |layer| {
+                        own_program(program, layer, drawn)
+                    })
+                    .into_iter()
+                    .map(|(q, n, p)| (q * 4, n * 4, p))
+                    .collect()
+                } else {
+                    vec![(start, vertices, program)]
+                };
+                for (s, n, p) in pieces {
+                    let overlay = self.scratch.get(s as usize).map_or(0, |v| v.layer & 0xffff);
+                    if p != program && casts {
+                        let at = posed + s;
+                        self.push_draw(span, at, n, program, false, true, overlay, portal, false);
+                    }
+                    self.push_draw(
+                        span,
+                        posed + s,
+                        n,
+                        p,
+                        pack,
+                        casts && p == program,
+                        overlay,
+                        portal,
+                        part == Part::WaterMask,
+                    );
+                }
                 // The glint over the run's foil quads, drawn again by the glint's program.
                 if pack && part == Part::Plain {
                     let foil = pack_glint::split(&self.scratch, start / 4, vertices / 4, |o| {
@@ -950,7 +978,23 @@ pub const GLINT: usize = 8;
 pub const ARMOR_GLINT: usize = 9;
 /// Lightning bolts (`gbuffers_lightning`).
 pub const LIGHTNING: usize = 10;
-pub const PROGRAMS: usize = 11;
+/// The eyes render type's layers (`gbuffers_spidereyes`), after the entities they cover.
+pub const SPIDEREYES: usize = 11;
+pub const PROGRAMS: usize = 12;
+
+/// The program that draws a quad with layer word `layer` of a run that `program` draws: the
+/// pack's own program for translucent particles, translucent items (on an entity or a block
+/// entity) and the eyes render type, when it has one, else `program`.
+fn own_program(program: usize, layer: u32, drawn: [bool; PROGRAMS]) -> usize {
+    let own = match program {
+        PARTICLE if layer & 0xffff == super::TRANSLUCENT_PARTICLE_OVERLAY => PARTICLE_TRANSLUCENT,
+        BLOCK if pack_glint::translucent_item(layer) => BLOCK_TRANSLUCENT,
+        ENTITY if layer & super::EYES_ENTITY != 0 => SPIDEREYES,
+        ENTITY if pack_glint::translucent_item(layer) => TRANSLUCENT,
+        _ => program,
+    };
+    if drawn[own] { own } else { program }
+}
 
 /// The program that draws the glint of a quad with overlay code `overlay`, if it has one.
 fn glint_program(overlay: u32) -> Option<usize> {
@@ -1097,6 +1141,25 @@ mod tests {
     }
 
     #[test]
+    fn eyes_and_translucent_items_go_to_their_own_programs_when_the_pack_has_them() {
+        let all = [true; PROGRAMS];
+        let eyes = super::super::EYES_ENTITY | 3 << 16;
+        let glass = super::super::TRANSLUCENT_ITEM_OVERLAY | 3 << 16;
+        assert_eq!(own_program(ENTITY, eyes, all), SPIDEREYES);
+        assert_eq!(own_program(ENTITY, glass, all), TRANSLUCENT);
+        assert_eq!(own_program(BLOCK, glass, all), BLOCK_TRANSLUCENT);
+        assert_eq!(own_program(ENTITY, 0, all), ENTITY);
+        // A translucent particle's overlay means nothing on an entity.
+        let particle = super::super::TRANSLUCENT_PARTICLE_OVERLAY;
+        assert_eq!(own_program(ENTITY, particle, all), ENTITY);
+        assert_eq!(own_program(PARTICLE, particle, all), PARTICLE_TRANSLUCENT);
+        // Without the program, the run's own draws them.
+        let mut some = all;
+        some[SPIDEREYES] = false;
+        assert_eq!(own_program(ENTITY, eyes, some), ENTITY);
+    }
+
+    #[test]
     fn runs_split_the_list_between_pack_and_horizon() {
         let v = |layer| Vertex {
             layer,
@@ -1118,20 +1181,13 @@ mod tests {
         let all = [true; PROGRAMS];
         assert_eq!(drawn_by_pack(&spans[0], all), Some(ENTITY));
         assert_eq!(drawn_by_pack(&spans[1], all), Some(PARTICLE));
-        assert_eq!(
-            drawn_by_pack(
-                &spans[1],
-                [true, true, true, false, true, true, false, false, true, true, true]
-            ),
-            None
-        );
-        assert_eq!(
-            drawn_by_pack(
-                &spans[2],
-                [true, false, true, true, true, true, false, false, true, true, true]
-            ),
-            None
-        );
+        let without = |p: usize| {
+            let mut drawn = all;
+            drawn[p] = false;
+            drawn
+        };
+        assert_eq!(drawn_by_pack(&spans[1], without(PARTICLE)), None);
+        assert_eq!(drawn_by_pack(&spans[2], without(BLOCK)), None);
         assert_eq!(drawn_by_pack(&spans[2], all), Some(BLOCK));
         let shadow = EntitySpan {
             translucent: true,

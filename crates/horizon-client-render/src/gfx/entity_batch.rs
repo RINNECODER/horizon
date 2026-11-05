@@ -41,6 +41,9 @@ pub const FLUID_OVERLAY: u32 = 41;
 /// (`RenderTypes.entityTranslucent`, `entityTranslucentEmissive`, `eyes`,
 /// `breezeWind`). Only the improved transparency path reads it.
 pub const OIT_ENTITY: u32 = 1 << 24;
+/// A bit of `Vertex::layer`, beside `OIT_ENTITY`: the quad is the eyes render type's
+/// (`RenderTypes.eyes`), which a shader pack draws with `gbuffers_spidereyes`.
+pub const EYES_ENTITY: u32 = 1 << 25;
 /// `RenderPipelines.DRAGON_RAYS`: untextured colour, additive with depth writes.
 pub const DRAGON_RAYS_OVERLAY: u32 = 37;
 /// `RenderPipelines.ENTITY_CUTOUT_DISSOLVE` (the dying dragon): a pixel is dropped where the
