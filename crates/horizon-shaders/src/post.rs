@@ -229,6 +229,10 @@ const PARTICLES: [&str; 4] = [
 /// probe pack of ours (#10490).
 pub const CELESTIAL_BLEND: Blend = [Factor::SrcAlpha, Factor::One, Factor::One, Factor::Zero];
 
+/// `gbuffers_spidereyes` and its fallbacks (the shaders.properties reference): the eyes render
+/// type's layers (spiders', endermen's, phantoms' eyes).
+const SPIDEREYES: [&str; 3] = ["gbuffers_spidereyes", "gbuffers_textured", "gbuffers_basic"];
+
 /// `gbuffers_armor_glint` and its fallbacks (the shaders.properties reference): the
 /// enchantment glint over items and armour.
 const ARMOR_GLINT: [&str; 3] = [
@@ -529,6 +533,9 @@ pub struct Post {
     pub glint: Option<PostProgram>,
     pub armor_glint: Option<PostProgram>,
     pub hand_glint: Option<PostProgram>,
+    /// What draws the eyes render type's layers, over the entities, blended without depth
+    /// writes.
+    pub spidereyes: Option<PostProgram>,
     /// What draws beacon and End gateway beams: blended, with the translucent entity parts
     /// (before deferred unless `separateEntityDraws`).
     pub beacon_beam: Option<PostProgram>,
@@ -625,6 +632,7 @@ impl Post {
             &self.hand_water,
             &self.block_translucent,
             &self.lightning,
+            &self.spidereyes,
             &self.shadow,
             &self.shadow_water,
             &self.shadow_entities,
@@ -791,6 +799,7 @@ pub fn load_post(
         glint: None,
         armor_glint: None,
         hand_glint: None,
+        spidereyes: None,
         beacon_beam: None,
         lightning: None,
         damaged_block: None,
@@ -988,6 +997,8 @@ pub fn load_post(
         };
     let mut gbuffers_dyn = |names: &[&str], i: &GbuffersInputs| gbuffers(names, Group::Gbuffers, i);
     let entities_translucent = translucent(&ENTITIES_TRANSLUCENT, 0.0, &mut gbuffers_dyn);
+    // The eyes blend as vanilla's `RenderTypes.eyes` does (translucent, entity_batch.rs).
+    let spidereyes = translucent(&SPIDEREYES, 0.1, &mut gbuffers_dyn);
     let particles = translucent(&PARTICLES, 0.1, &mut gbuffers_dyn);
     // Optional slots deliberately have no fallback chain: an absent, disabled or rejected
     // variant must leave the legacy material grouping and state intact.
@@ -1174,6 +1185,7 @@ pub fn load_post(
     loader.post.glint = item_glint;
     loader.post.armor_glint = armor_glint;
     loader.post.hand_glint = hand_glint;
+    loader.post.spidereyes = spidereyes;
     loader.post.beacon_beam = beacon_beam;
     loader.post.lightning = lightning;
     loader.post.damaged_block = damaged_block;
@@ -1238,6 +1250,7 @@ fn load_shadow(
         &post.hand_glint,
         &post.hand_water,
         &post.block_translucent,
+        &post.spidereyes,
     ];
     // A program's compute stages count as its other stages do: Iris 1.11.7 drew the shadow map
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
@@ -3554,6 +3567,12 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         assert_eq!(
             (block.name.as_str(), block.blend),
             ("gbuffers_terrain", Some(TRANSLUCENT_BLEND))
+        );
+        // The eyes fall back to gbuffers_textured (not the entities' chain), blended.
+        let eyes = post.spidereyes.as_ref().unwrap();
+        assert_eq!(
+            (eyes.name.as_str(), eyes.blend),
+            ("gbuffers_textured", Some(TRANSLUCENT_BLEND))
         );
         // Translucent held items fall back to the hand's chain, after deferred, blended.
         let hand_water = post.hand_water.as_ref().unwrap();

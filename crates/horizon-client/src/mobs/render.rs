@@ -2230,17 +2230,18 @@ fn render_visible(
                     job.overlay |= crate::gfx::OIT_ENTITY;
                 }
                 if eyes {
-                    job.overlay |= u32::from(EYES_TIER) << 16;
+                    job.overlay |= u32::from(EYES_TIER) << 16 | crate::gfx::EYES_ENTITY;
                     job.mode = crate::gfx::entity_skin::SkinJob::FLAT;
                 }
             }
         }
         // The eyes render type's glowing eyes also shine in HDR output, at
-        // `EYES_TIER` in the overlay's high bits (entity.wgsl fs_hdr_mark).
+        // `EYES_TIER` in the overlay's high bits (entity.wgsl fs_hdr_mark), and are
+        // tagged for a shader pack's `gbuffers_spidereyes`.
         if layer.full_bright && m.species() != Species::Warden {
             for vertex in &mut out[start..] {
                 vertex.normal = [0; 4];
-                vertex.layer |= u32::from(EYES_TIER) << 16;
+                vertex.layer |= u32::from(EYES_TIER) << 16 | crate::gfx::EYES_ENTITY;
             }
         }
         // The warden's heart and spots shine too, by how far their layers have faded in.

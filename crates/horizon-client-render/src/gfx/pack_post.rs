@@ -22,7 +22,9 @@ use horizon_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 use smallvec::SmallVec;
 
 use super::pack_draw::DrawUniforms;
-use super::pack_entities::{ARMOR_GLINT, BEAM, GLINT, LIGHTNING, PROGRAMS, PackEntities};
+use super::pack_entities::{
+    ARMOR_GLINT, BEAM, GLINT, LIGHTNING, PROGRAMS, PackEntities, SPIDEREYES,
+};
 use super::pack_images;
 use super::pack_sky::PackSky;
 use super::pack_textures;
@@ -2779,6 +2781,7 @@ impl PackPost {
             post.glint,
             post.armor_glint,
             post.lightning,
+            post.spidereyes,
         ];
         let mut late = [
             false,
@@ -2793,7 +2796,8 @@ impl PackPost {
             true,
             false,
             false,
-            // Lightning draws before deferred (it is not among the programs after it).
+            // Lightning and eyes draw before deferred (not among the programs after it).
+            false,
             false,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
@@ -2846,8 +2850,8 @@ impl PackPost {
                         cull: false,
                     };
                     paged(build(p, Some(&glint)))
-                } else if p.name == "gbuffers_damagedblock" || at == LIGHTNING {
-                    // Neither the crack nor lightning writes depth, as vanilla draws them.
+                } else if p.name == "gbuffers_damagedblock" || at == LIGHTNING || at == SPIDEREYES {
+                    // Neither the crack, lightning nor eyes write depth, as vanilla draws them.
                     paged(build(p, Some(&g.with_depth(false))))
                 } else {
                     paged(build(p, Some(g)))
@@ -3060,6 +3064,7 @@ impl PackPost {
             "translucent particles",
             "translucent block entities",
             "lightning bolts",
+            "eyes",
         ];
         if let Some(l) = &lines {
             notes.push(format!("the block outline draws with {}", l.name));
