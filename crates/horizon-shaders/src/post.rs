@@ -500,7 +500,8 @@ pub struct Post {
     pub particles: Option<PostProgram>,
     /// The translucent particle variant for explicit mixed ordering, when it loads.
     pub particles_translucent: Option<PostProgram>,
-    /// What draws beacon and End gateway beams (after deferred, blended).
+    /// What draws beacon and End gateway beams: blended, with the translucent entity parts
+    /// (before deferred unless `separateEntityDraws`).
     pub beacon_beam: Option<PostProgram>,
     pub damaged_block: Option<PostProgram>,
     /// What draws the game's clouds.
@@ -542,6 +543,8 @@ pub struct Post {
     pub translucent_late: bool,
     /// Particles draw after deferred (`particles.ordering`, `particles.before.deferred`, 3.2).
     pub particles_late: bool,
+    /// Beams write depth (`beacon.beam.depth`, off by default).
+    pub beam_depth: bool,
     /// The custom uniforms of `shaders.properties` (3.4).
     pub custom: Custom,
     /// `texture.*`: the textures the pack binds to sampler names.
@@ -761,6 +764,7 @@ pub fn load_post(
         shadow_comp: Vec::new(),
         translucent_late: false,
         particles_late: false,
+        beam_depth: false,
         custom: Custom::parse(properties),
         textures: Vec::new(),
         sizes: [None; crate::BUFFERS],
@@ -1114,6 +1118,7 @@ pub fn load_post(
     loader.post.hand_water = hand_water;
     let flag = |key: &str| properties.get(key).map(|v| v.trim() == "true");
     loader.post.translucent_late = flag("separateEntityDraws").unwrap_or(false);
+    loader.post.beam_depth = flag("beacon.beam.depth").unwrap_or(false);
     // Keep the legacy timing here. The renderer moves ordinary mixed particles earlier
     // only after it has successfully built their translucent variant.
     loader.post.particles_late = match properties.get("particles.ordering").map(str::trim) {
@@ -3414,6 +3419,11 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         );
         assert_eq!(particles.blend, Some(TRANSLUCENT_BLEND));
         assert!(post.particles_late && !post.translucent_late);
+        // Beams blend and write no depth unless `beacon.beam.depth`.
+        assert_eq!(
+            (post.beacon_beam.as_ref().unwrap().blend, post.beam_depth),
+            (Some(TRANSLUCENT_BLEND), false)
+        );
         // Clouds fall back to gbuffers_textured, blended.
         let clouds = post.clouds.as_ref().unwrap();
         assert_eq!(
@@ -3447,11 +3457,11 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             )
         );
         let ordering = Properties::parse(
-            "particles.ordering = before\nseparateEntityDraws = true\n",
+            "particles.ordering = before\nseparateEntityDraws = true\nbeacon.beam.depth = true\n",
             &macros,
         );
         let post = load_post(&pack, "", &ordering, &macros, &inputs);
-        assert!(!post.particles_late && post.translucent_late);
+        assert!(!post.particles_late && post.translucent_late && post.beam_depth);
         let properties = Properties::parse(
             "blend.gbuffers_terrain = ONE ONE ZERO ONE\nblend.gbuffers_water = off\n",
             &macros,
