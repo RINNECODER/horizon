@@ -271,6 +271,7 @@ pub const NAMES: &[&str] = &[
     "rainStrength",
     "wetness",
     "thunderStrength",
+    "lightningBoltPosition",
     "fogColor",
     "skyColor",
     "fogMode",
@@ -1014,6 +1015,13 @@ impl FrameUniforms {
                 "isElytraFlying" => Value::i(&[inputs.elytra_flying as i32]),
                 "cloudHeight" => Value::f(&[inputs.cloud_height]),
                 "cloudTime" => Value::f(&[inputs.cloud_time]),
+                // In player space, w 1; all zero with no bolt. Iris picks any of several bolts.
+                "lightningBoltPosition" => {
+                    Value::f(&frame.lightning.bolts.first().map_or([0.0; 4], |b| {
+                        let p = (glam::DVec3::from(b.at) - frame.camera).as_vec3();
+                        [p.x, p.y, p.z, 1.0]
+                    }))
+                }
                 "ambientLight" => Value::f(&[inputs.ambient_light]),
                 // Iris 1.11.7 gave both the same value in every scene measured.
                 "playerMood" | "constantMood" => Value::f(&[inputs.mood]),
@@ -1136,7 +1144,7 @@ fn components(name: &str) -> usize {
         | "skyColor"
         | "endFlashPosition" => 3,
         "eyeBrightness" | "eyeBrightnessSmooth" | "atlasSize" => 2,
-        "entityColor" => 4,
+        "entityColor" | "lightningBoltPosition" => 4,
         // Horizon's own vec4s, a dynamic light and half a boat's water patch box; their counts
         // are ints.
         n if n.starts_with("horizonDynamicLight") && n != "horizonDynamicLightCount" => 4,
@@ -2653,6 +2661,26 @@ pub(super) mod initial_history_tests {
         assert_eq!(float(&u, "ambientLight")[0], 0.25);
         assert_eq!(float(&u, "playerMood")[0], 0.0235);
         assert_eq!(float(&u, "constantMood")[0], 0.0235);
+    }
+
+    /// Iris's ShaderDoc: the player-space position of a bolt being drawn, w 1; zero without one.
+    #[test]
+    fn lightning_bolt_position_is_relative_to_the_camera() {
+        let hud = HudBatch::new([800, 450]);
+        let mut u = FrameUniforms::default();
+        let mut f = frame(&hud);
+        u.update(&f, &PackInputs::default(), [800, 450]);
+        assert_eq!(float(&u, "lightningBoltPosition")[..4], [0.0; 4]);
+        let bolts = [crate::gfx::lightning::Bolt {
+            at: [f.camera.x + 3.0, f.camera.y - 4.0, f.camera.z + 5.0],
+            seed: 1,
+        }];
+        f.lightning.bolts = &bolts;
+        u.update(&f, &PackInputs::default(), [800, 450]);
+        assert_eq!(
+            float(&u, "lightningBoltPosition")[..4],
+            [3.0, -4.0, 5.0, 1.0]
+        );
     }
 
     pub(in crate::gfx) fn frame(hud: &HudBatch) -> Frame<'_> {
