@@ -35,6 +35,7 @@ fn noise_width(vertex_extra: &str, fragment_extra: &str) -> u8 {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

@@ -71,6 +71,7 @@ fn the_sun_leaves_its_own_alpha_over_the_sky() {
             celestial: Some(sun),
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

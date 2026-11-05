@@ -47,6 +47,7 @@ fn a_float_output_into_an_integer_buffer_writes_its_bits() {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

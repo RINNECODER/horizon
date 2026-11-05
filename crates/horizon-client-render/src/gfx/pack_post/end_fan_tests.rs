@@ -58,6 +58,7 @@ fn picture(gpu: &Gpu, boss_world_fog: bool) -> Vec<[u8; 4]> {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

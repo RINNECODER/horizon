@@ -130,6 +130,7 @@ void main() {
             buffers: &[],
             table: None,
             depth_write: true,
+            depth_equal: false,
             atlas: None,
             material_maps: true,
             ids: None,
@@ -141,6 +142,7 @@ void main() {
         clouds: None,
         weather: false,
         hand: false,
+        glint: None,
     };
     let mut post = PackPost::new(
         &device,

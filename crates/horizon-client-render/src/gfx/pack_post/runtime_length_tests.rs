@@ -35,6 +35,7 @@ fn a_runtime_arrays_length_is_the_buffers() {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

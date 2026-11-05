@@ -241,6 +241,7 @@ mod pack_atlas;
 mod pack_center_depth;
 pub mod pack_draw;
 mod pack_entities;
+mod pack_glint;
 mod pack_hand;
 mod pack_images;
 mod pack_lines;
@@ -1278,6 +1279,8 @@ pub struct Renderer {
     /// The anisotropic sampler's clamp (`Options.maxAnisotropyValue`); 1 unless anisotropic.
     max_anisotropy: u16,
     lightmap_view: wgpu::TextureView,
+    /// `enchanted_glint_item` and `enchanted_glint_armor`, for a shader pack's glint.
+    glint_views: [wgpu::TextureView; 2],
     lightmap_sampler: wgpu::Sampler,
     animations: animate::SpriteAnimator,
     material_animations: Vec<SpriteAnimation>,
@@ -4975,6 +4978,7 @@ impl Renderer {
             texture_filtering: 0,
             max_anisotropy: 1,
             lightmap_view,
+            glint_views: [glint_view.clone(), glint_armor_view.clone()],
             lightmap_sampler,
             animations,
             material_animations,
@@ -6990,6 +6994,7 @@ impl Renderer {
                     buffers: if flat { &[] } else { &buffers },
                     table: self.flat.as_ref().filter(|_| flat).map(|f| &f.draw_layout),
                     depth_write: true,
+                    depth_equal: false,
                     atlas: None,
                     material_maps: true,
                     ids: None,
@@ -7004,6 +7009,7 @@ impl Renderer {
                 clouds: Some(&self.cloud_bindings),
                 weather: true,
                 hand: true,
+                glint: Some(self.glint_views.clone()),
             };
             pack_post::PackPost::new(
                 &self.device,
@@ -7126,6 +7132,7 @@ impl Renderer {
             .as_ref()
             .map(|a| [a[0].view.clone(), a[1].view.clone()]);
         let lightmap = self.lightmap_view.clone();
+        let glint = Some(self.glint_views.clone());
         let gui_size = self
             .hud
             .atlas_texture
@@ -7168,6 +7175,7 @@ impl Renderer {
                     buffers: if flat { &[] } else { &buffers },
                     table: table.as_ref(),
                     depth_write: true,
+                    depth_equal: false,
                     atlas: None,
                     material_maps: true,
                     ids: None,
@@ -7176,6 +7184,7 @@ impl Renderer {
                 block_ids: &block_ids,
                 celestial,
                 clouds: Some(&clouds),
+                glint,
                 weather: true,
                 hand: true,
             };
@@ -7342,6 +7351,8 @@ impl Renderer {
             sky: Some(pack_sky::inputs()),
             celestial: Some(pack_sky::celestial_inputs()),
             entities: Some(pack_entities::inputs()),
+            glint: Some(pack_glint::inputs(pack_entities::inputs(), true)),
+            hand_glint: Some(pack_glint::inputs(pack_hand::inputs(), false)),
             clouds: Some(pack_entities::cloud_inputs()),
             weather: Some(pack_weather::inputs()),
             lines: Some(pack_lines::inputs()),
@@ -9272,6 +9283,7 @@ impl Renderer {
                 &mut self.pack_entity_rest,
                 skin.filter(|_| pack_skin),
                 (frame.entity_motion, frame.entity_motion_posed),
+                frame.glint_ticks,
             );
             entities = &self.pack_entity_rest;
         }
