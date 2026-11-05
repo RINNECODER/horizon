@@ -142,11 +142,11 @@ fn geometry_vertex_reads_the_provided_fade_and_requires_its_provider() {
         index: "@".into(),
         ..Default::default()
     };
-    let (_, count) = translate_geometry(&vertex, &geometry, &fragment, &inputs).unwrap();
+    let (_, count) = translate_geometry(&vertex, &geometry, &fragment, &inputs, false).unwrap();
     assert_eq!(count, 1);
     inputs.inputs.attributes.clear();
     geometry.code = geometry.code.replace("mc_chunkFade", "stage_bias");
-    assert!(translate_geometry(&vertex, &geometry, &fragment, &inputs).is_err());
+    assert!(translate_geometry(&vertex, &geometry, &fragment, &inputs, false).is_err());
 }
 
 #[test]
@@ -165,7 +165,8 @@ fn geometry_vertex_keeps_authored_fade_globals() {
     ] {
         let [vertex, mut geometry, fragment] = geometry_probe(declaration);
         geometry.code = geometry.code.replace("mc_chunkFade", "stage_bias");
-        let (program, _) = translate_geometry(&vertex, &geometry, &fragment, &inputs).unwrap();
+        let (program, _) =
+            translate_geometry(&vertex, &geometry, &fragment, &inputs, false).unwrap();
         assert_eq!(
             program
                 .interface

@@ -142,6 +142,46 @@ pub fn celestial_inputs() -> horizon_shaders::GbuffersInputs {
     }
 }
 
+/// `inputs` for a geometry stage, which reads the draw's vertices itself: words at set 5
+/// (`PackSky::vertex_groups`), `pull` setting the inputs from vertex `hz_vertex_index`. The sky's
+/// draws are triangle lists, so corner `c` of a draw is vertex `c`.
+fn pulled(
+    mut inputs: horizon_shaders::GbuffersInputs,
+    pull: String,
+) -> horizon_shaders::GeometryInputs {
+    inputs.declarations.push_str(
+        "layout(set = 5, binding = 0) readonly buffer HzSkyVertices { uint hz_sky_vertices[]; };\n",
+    );
+    horizon_shaders::GeometryInputs {
+        inputs,
+        pull,
+        index: "(@)".to_owned(),
+    }
+}
+
+/// What `gbuffers_skybasic` with a geometry stage reads (`Vertex`, four words).
+pub fn geometry_inputs() -> horizon_shaders::GeometryInputs {
+    pulled(
+        inputs(),
+        "        uint hz_pw = hz_vertex_index * 4u;\n        \
+         hz_v_pos = uintBitsToFloat(uvec3(hz_sky_vertices[hz_pw], hz_sky_vertices[hz_pw + 1u], hz_sky_vertices[hz_pw + 2u]));\n        \
+         hz_v_kind = hz_sky_vertices[hz_pw + 3u];\n"
+            .to_owned(),
+    )
+}
+
+/// What `gbuffers_skytextured` with a geometry stage reads (`Celestial`, six words).
+pub fn celestial_geometry_inputs() -> horizon_shaders::GeometryInputs {
+    pulled(
+        celestial_inputs(),
+        "        uint hz_pw = hz_vertex_index * 6u;\n        \
+         hz_v_pos = uintBitsToFloat(uvec3(hz_sky_vertices[hz_pw], hz_sky_vertices[hz_pw + 1u], hz_sky_vertices[hz_pw + 2u]));\n        \
+         hz_v_uv = uintBitsToFloat(uvec2(hz_sky_vertices[hz_pw + 3u], hz_sky_vertices[hz_pw + 4u]));\n        \
+         hz_v_color = unpackUnorm4x8(hz_sky_vertices[hz_pw + 5u]);\n"
+            .to_owned(),
+    )
+}
+
 /// One draw of the sky: its render stage, whether `gbuffers_skytextured` draws it, its vertices.
 pub(super) struct Part {
     pub stage: &'static str,
@@ -268,12 +308,14 @@ impl PackSky {
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Shader pack sky"),
             contents: bytemuck::cast_slice(&v),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
         });
         let celestial = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shader pack sun and moon"),
             size: (std::mem::size_of::<Celestial>() * 6 * CELESTIAL_QUADS) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -416,5 +458,24 @@ impl PackSky {
             pass.set_bind_group(1, &self.group, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
         }
+    }
+
+    /// The sky's and the sun and moon's vertices as words for a geometry stage (set 5,
+    /// `geometry_inputs`), with `layout`: one storage buffer at binding 0.
+    pub fn vertex_groups(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+    ) -> [wgpu::BindGroup; 2] {
+        [&self.vertices, &self.celestial].map(|buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shader pack sky vertices"),
+                layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            })
+        })
     }
 }
