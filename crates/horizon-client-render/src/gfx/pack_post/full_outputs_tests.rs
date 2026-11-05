@@ -83,6 +83,7 @@ fn a_shadow_program_with_every_output_drops_the_boats_patches_not_its_water() {
             buffers: &layouts,
             table: None,
             depth_write: true,
+            depth_equal: false,
             atlas: None,
             ids: None,
             cull: true,

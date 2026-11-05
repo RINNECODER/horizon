@@ -5,6 +5,7 @@
 use glam::Mat4;
 
 use super::Vertex;
+use super::pack_glint;
 
 /// `MC_HAND_DEPTH`'s value (1.5): the hand's depth is scaled by it through its projection, so
 /// that it sits in front of the world in the shared depth buffer.
@@ -67,6 +68,8 @@ pub struct PackHand {
     pub runs: Vec<(u32, u32, u32)>,
     pub translucent_runs: Vec<(u32, u32, u32)>,
     order: Vec<Vertex>,
+    /// The runs of glinting quads: over opaque items, over translucent ones.
+    pub glint_runs: [Vec<(u32, u32, u32)>; 2],
 }
 
 impl PackHand {
@@ -133,6 +136,7 @@ impl PackHand {
             runs: Vec::new(),
             translucent_runs: Vec::new(),
             order: Vec::new(),
+            glint_runs: [Vec::new(), Vec::new()],
         }
     }
 
@@ -168,7 +172,9 @@ impl PackHand {
     }
 
     /// Uploads this frame's hand, its projection, and the `HzDraw` of each run `items` starts
-    /// (first vertex, `currentRenderedItemId`; the slots past [`SLOTS`] share the last).
+    /// (first vertex, `currentRenderedItemId`; the slots past [`SLOTS`] share the last). The
+    /// translucent items are runs of their own (`translucent_runs`), and glinting quads too
+    /// (`glint_runs`).
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -180,6 +186,7 @@ impl PackHand {
         self.quads = (hand.len() / 4) as u32;
         self.runs.clear();
         self.translucent_runs.clear();
+        self.glint_runs.iter_mut().for_each(Vec::clear);
         if self.quads == 0 {
             return;
         }
@@ -192,11 +199,14 @@ impl PackHand {
                 contents.extend_from_slice(&draw_slot(id, translucent));
                 contents.resize(((slot + 1) * self.stride) as usize, 0);
             }
-            let run = (first, quads, (slot * self.stride) as u32);
-            if translucent {
-                self.translucent_runs.push(run);
-            } else {
-                self.runs.push(run);
+            let offset = (slot * self.stride) as u32;
+            [&mut self.runs, &mut self.translucent_runs][usize::from(translucent)]
+                .push((first, quads, offset));
+            let glint = |o| pack_glint::glint(o) != pack_glint::Glint::None;
+            for (q, n, g) in pack_glint::split(&self.order, first, quads, glint) {
+                if g {
+                    self.glint_runs[usize::from(translucent)].push((q, n, offset));
+                }
             }
         }
         queue.write_buffer(&self.slots, 0, &contents);

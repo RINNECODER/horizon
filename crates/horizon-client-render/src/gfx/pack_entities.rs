@@ -10,6 +10,7 @@ use horizon_shaders::render_stage;
 
 use super::Vertex;
 use super::pack_draw::EntitySpan;
+use super::pack_glint;
 
 /// `HzDraw`'s size (pack_draw.rs).
 const SLOT: u64 = 32;
@@ -276,6 +277,8 @@ pub(super) struct PackEntities {
     /// Set 1: the vertices again, for the quads' corners; last frame's and the indices into them.
     pub table: wgpu::BindGroupLayout,
     pub table_group: wgpu::BindGroup,
+    /// Set 1, binding 1: the armour glint's texture matrix (`pack_glint::inputs`).
+    glint: wgpu::Buffer,
     slots: wgpu::Buffer,
     pub group: wgpu::BindGroup,
     stride: u64,
@@ -304,12 +307,32 @@ impl PackEntities {
         };
         let table = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shader pack entity vertices"),
-            entries: &[entry(0), entry(2), entry(3)],
+            entries: &[
+                entry(0),
+                // `HzGlint`: the armour glint's scroll (pack_glint.rs).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                entry(2),
+                entry(3),
+            ],
         });
         let vertices = Self::vertex_buffer(device, 4096);
         let previous = Self::vertex_buffer(device, 4096);
         let previous_index = Self::index_buffer(device, 4096);
-        let table_group = Self::table_group(device, &table, &vertices, &previous, &previous_index);
+        let glint = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shader pack armour glint"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }); let table_group = Self::table_group(device, &table, &vertices, &previous, &previous_index, &glint);
         let (slots, group) = Self::slot_buffer(device, layout, 64, stride);
         Self {
             vertices,
@@ -320,6 +343,7 @@ impl PackEntities {
             index_scratch: Vec::new(),
             table,
             table_group,
+            glint,
             slots,
             group,
             stride,
@@ -356,7 +380,7 @@ impl PackEntities {
         table: &wgpu::BindGroupLayout,
         vertices: &wgpu::Buffer,
         previous: &wgpu::Buffer,
-        index: &wgpu::Buffer,
+        index: &wgpu::Buffer, glint: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shader pack entity vertices"),
@@ -373,7 +397,7 @@ impl PackEntities {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: index.as_entire_binding(),
-                },
+                }, wgpu::BindGroupEntry { binding: 1, resource: glint.as_entire_binding(), },
             ],
         })
     }
@@ -436,6 +460,7 @@ impl PackEntities {
         rest: &mut Vec<Vertex>,
         skin: Option<&super::entity_skin::SkinFrame>,
         motion: (&[(u32, u64)], &[u32]),
+        glint_ticks: f32,
     ) {
         self.draws.clear();
         self.scratch.clear();
@@ -446,6 +471,8 @@ impl PackEntities {
         std::mem::swap(&mut self.motion, &mut self.previous_motion);
         self.motion.clear();
         let mut copied = Vec::new();
+        let armor = pack_glint::armor_matrix(glint_ticks).to_cols_array();
+        queue.write_buffer(&self.glint, 0, bytemuck::cast_slice(&armor));
         let posed = skin.map_or(0, |s| s.vertices);
         if let Some(skin) = skin {
             for (span, range, overlay) in skin_runs(skin) {
@@ -466,6 +493,20 @@ impl PackEntities {
                     false,
                     false,
                 );
+                // A posed run has one overlay: all of it glints, or none.
+                if let Some(glint) = glint_program(overlay).filter(|&g| pack && drawn[g]) {
+                    self.push_draw(
+                        span,
+                        range.start,
+                        range.len() as u32,
+                        glint,
+                        true,
+                        false,
+                        overlay,
+                        false,
+                        false,
+                    );
+                }
             }
         }
         let first = spans.first().map_or(entities.len(), |s| s.start as usize);
@@ -585,8 +626,8 @@ impl PackEntities {
                     as_portal_texture(&mut self.scratch[start as usize..]);
                 }
                 let vertices = self.scratch.len() as u32 - start;
-                let overlay = self.scratch[start as usize].layer & 0xffff;
                 let portal = part == Part::Portal;
+                let overlay = self.scratch[start as usize].layer & 0xffff;
                 self.push_draw(
                     span,
                     posed + start,
@@ -598,6 +639,19 @@ impl PackEntities {
                     portal,
                     part == Part::WaterMask,
                 );
+                // The glint over the run's foil quads, drawn again by the glint's program.
+                if pack && part == Part::Plain {
+                    let foil = pack_glint::split(&self.scratch, start / 4, vertices / 4, |o| {
+                        glint_program(o).filter(|&g| drawn[g])
+                    });
+                    for (q, n, glint) in foil {
+                        if let Some(glint) = glint {
+                            let overlay = self.scratch[q as usize * 4].layer & 0xffff;
+                            let at = posed + q * 4;
+                            self.push_draw(span, at, n * 4, glint, true, false, overlay, false, false);
+                        }
+                    }
+                }
             }
         }
         if self.draws.is_empty() && posed == 0 {
@@ -634,7 +688,7 @@ impl PackEntities {
             &self.table,
             &self.vertices,
             &self.previous,
-            &self.previous_index,
+            &self.previous_index, &self.glint,
         );
         if need_slots > have_slots {
             (self.slots, self.group) =
@@ -823,7 +877,6 @@ pub const DESTROY: usize = 4;
 pub const BEAM: usize = 5;
 pub const BLOCK_TRANSLUCENT: usize = 6;
 pub const PARTICLE_TRANSLUCENT: usize = 7;
-pub const PROGRAMS: usize = 8;
 
 /// Translucent blocks retain the ordinary block shadow program and blockEntityId.
 pub fn shadow_program(program: usize) -> usize {
@@ -890,6 +943,20 @@ fn material_runs<'a>(
             Some((span, run, program))
         })
     })
+}
+/// The enchantment glint over items and over armour (`gbuffers_armor_glint`), each with its
+/// own texture.
+pub const GLINT: usize = 8;
+pub const ARMOR_GLINT: usize = 9;
+pub const PROGRAMS: usize = 10;
+
+/// The program that draws the glint of a quad with overlay code `overlay`, if it has one.
+fn glint_program(overlay: u32) -> Option<usize> {
+    match pack_glint::glint(overlay) {
+        pack_glint::Glint::None => None,
+        pack_glint::Glint::Item => Some(GLINT),
+        pack_glint::Glint::Armor => Some(ARMOR_GLINT),
+    }
 }
 
 /// Which program draws `span`'s run, given which of them (or their fallbacks) the pack has;
@@ -1050,14 +1117,14 @@ mod tests {
         assert_eq!(
             drawn_by_pack(
                 &spans[1],
-                [true, true, true, false, true, true, false, false]
+                [true, true, true, false, true, true, false, false, true, true]
             ),
             None
         );
         assert_eq!(
             drawn_by_pack(
                 &spans[2],
-                [true, false, true, true, true, true, false, false]
+                [true, false, true, true, true, true, false, false, true, true]
             ),
             None
         );
@@ -1334,6 +1401,7 @@ mod gpu_span_tests {
                     &mut rest,
                     None,
                     (&[], &[]),
+                    0.0,
                 );
                 assert_eq!(
                     geometry.scratch.len(),
@@ -1474,6 +1542,7 @@ mod gpu_span_tests {
             &mut rest,
             None,
             (&[], &[]),
+            0.0,
         );
         assert_eq!(
             (geometry.draws.iter())
@@ -1531,6 +1600,7 @@ mod gpu_span_tests {
                 rest,
                 None,
                 (&[], &[]),
+                0.0,
             );
             let draws = (geometry.draws.iter())
                 .map(|d| (d.base, d.program, d.pack, d.shadow, d.water_mask))
@@ -1629,6 +1699,7 @@ mod gpu_span_tests {
             &mut rest,
             Some(&skin),
             (&[], &[]),
+            0.0,
         );
         assert_eq!(rest.len(), 4, "untagged CPU prefix stays in Horizon's draw");
         assert_eq!(geometry.scratch.len(), 4, "only CPU geometry is uploaded");
@@ -1673,6 +1744,7 @@ mod gpu_span_tests {
             &mut rest,
             None,
             (&[], &[]),
+            0.0,
         );
         assert!(geometry.draws.is_empty());
         assert_eq!(
@@ -1701,6 +1773,7 @@ mod gpu_span_tests {
             &mut rest,
             Some(&skin),
             (&[], &[]),
+            0.0,
         );
         assert!(geometry.draws.is_empty());
         assert!(geometry.skin_target().size() >= 5000 * 44);

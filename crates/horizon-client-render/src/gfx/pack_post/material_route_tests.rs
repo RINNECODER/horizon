@@ -82,6 +82,7 @@ fn authored_material_programs_render_and_legacy_draws_stay_unsplit() {
                 celestial: None,
                 gui_size: SIZE,
                 clouds: None,
+                glint: None,
                 weather: false,
                 hand: false,
             },
@@ -104,6 +105,7 @@ fn authored_material_programs_render_and_legacy_draws_stay_unsplit() {
                 &mut rest,
                 None,
                 (&[], &[]),
+                0.0,
             );
             assert!(rest.is_empty());
             let entities = post.entities.as_ref().unwrap();

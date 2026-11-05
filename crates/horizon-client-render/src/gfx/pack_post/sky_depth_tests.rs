@@ -73,6 +73,7 @@ fn picture(
             celestial: Some(sun),
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

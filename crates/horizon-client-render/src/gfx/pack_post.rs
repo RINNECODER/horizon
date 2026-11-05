@@ -22,7 +22,7 @@ use horizon_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 use smallvec::SmallVec;
 
 use super::pack_draw::DrawUniforms;
-use super::pack_entities::{BEAM, PROGRAMS, PackEntities};
+use super::pack_entities::{ARMOR_GLINT, BEAM, GLINT, PROGRAMS, PackEntities};
 use super::pack_images;
 use super::pack_sky::PackSky;
 use super::pack_textures;
@@ -556,6 +556,9 @@ pub(super) struct World<'a> {
     pub weather: bool,
     /// The game can hand its first-person hand to the pack.
     pub hand: bool,
+    /// The glint's textures (`enchanted_glint_item`, `enchanted_glint_armor`), for the
+    /// glint programs.
+    pub glint: Option<[wgpu::TextureView; 2]>,
 }
 
 /// This frame's block outline, when the pack draws it: the outline buffer (one instance per
@@ -654,8 +657,9 @@ pub struct PackPost {
     /// What draws the first-person hand (`gbuffers_hand` or its fallback), after the opaque
     /// world, and its vertices.
     hand: Option<(Pass, super::pack_hand::PackHand)>,
-    /// `gbuffers_hand_water` (or its fallback): the hand's translucent quads, after deferred.
-    hand_water: Option<Pass>,
+    /// With the hand: what draws translucent held items after deferred (`gbuffers_hand_water`
+    /// or its fallback), and the glint over held items (`gbuffers_armor_glint`...).
+    hand_more: [Option<Pass>; 2],
     /// The pre-translucent copy: `depthtex1`, or `depthtex2` without a shader hand.
     depth1: bool,
     /// A program after the hand reads `depthtex2`: it is copied before the hand.
@@ -1266,6 +1270,8 @@ pub(super) struct Geometry<'a> {
     pub table: Option<&'a wgpu::BindGroupLayout>,
     /// Writes depth (the sky does not).
     pub depth_write: bool,
+    /// Draws only where depth equals what is there: over geometry already drawn (the glint).
+    pub depth_equal: bool,
     /// What `texture` reads instead of the block atlas.
     pub atlas: Option<wgpu::TextureView>,
     /// This draw uses the block atlas's surface identities.
@@ -1283,6 +1289,7 @@ impl Geometry<'_> {
             buffers: self.buffers,
             table: self.table,
             depth_write,
+            depth_equal: false,
             atlas: self.atlas.clone(),
             material_maps: self.material_maps,
             ids: self.ids,
@@ -2029,7 +2036,11 @@ fn build_pass(
             depth_stencil: geometry.map(|g| wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(g.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if g.depth_equal {
+                    wgpu::CompareFunction::Equal
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: Default::default(),
                 bias: if p.name == "gbuffers_damagedblock" {
                     wgpu::DepthBiasState {
@@ -2673,6 +2684,7 @@ impl PackPost {
             buffers: g.buffers,
             table: g.table,
             depth_write: g.depth_write,
+            depth_equal: g.depth_equal,
             atlas: g.atlas.clone(),
             material_maps: g.material_maps,
             ids: block_ids.as_ref().map(|i| &i.0),
@@ -2698,6 +2710,7 @@ impl PackPost {
             buffers: g.buffers,
             table: g.table,
             depth_write: g.depth_write,
+            depth_equal: false,
             atlas: g.atlas.clone(),
             material_maps: g.material_maps,
             ids: g.ids,
@@ -2729,6 +2742,7 @@ impl PackPost {
                 buffers: &PackSky::buffers(),
                 table: Some(&geometry.layout),
                 depth_write: false,
+                depth_equal: false,
                 atlas: None,
                 material_maps: false,
                 ids: None,
@@ -2739,6 +2753,7 @@ impl PackPost {
                 buffers: &PackSky::celestial_buffers(),
                 table: None,
                 depth_write: false,
+                depth_equal: false,
                 atlas: world.celestial.clone(),
                 material_maps: false,
                 ids: None,
@@ -2761,6 +2776,8 @@ impl PackPost {
             post.beacon_beam,
             post.block_translucent,
             post.particles_translucent,
+            post.glint,
+            post.armor_glint,
         ];
         let mut late = [
             false,
@@ -2773,6 +2790,8 @@ impl PackPost {
             post.translucent_late,
             post.translucent_late,
             true,
+            false,
+            false,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
         let shadow_programs = [post.shadow_entities, post.shadow_block];
@@ -2784,6 +2803,7 @@ impl PackPost {
             buffers: &entity_buffers,
             table: Some(&e.table),
             depth_write: true,
+            depth_equal: false,
             atlas: world.celestial.clone(),
             material_maps: false,
             ids: None,
@@ -2800,11 +2820,30 @@ impl PackPost {
         let beam = programs[BEAM].take();
         let mut kind = 0;
         let mut entity_passes = programs.map(|p| {
+            let at = kind;
             // The entity program draws the boats, and their water patches (`Draw::water_mask`).
             water_mask_next.set(kind == super::pack_entities::ENTITY);
             kind += 1;
             p.zip(entity_geometry.as_ref()).and_then(|(p, g)| {
-                if p.name == "gbuffers_damagedblock" {
+                // The glint: its own texture, over what it covers without writing depth.
+                let glint = match at {
+                    GLINT => Some(0),
+                    ARMOR_GLINT => Some(1),
+                    _ => None,
+                };
+                if let Some(texture) = glint {
+                    let glint = Geometry {
+                        buffers: g.buffers,
+                        table: g.table,
+                        depth_write: false,
+                        depth_equal: true,
+                        atlas: Some(world.glint.as_ref()?[texture].clone()),
+                        material_maps: g.material_maps,
+                        ids: g.ids,
+                        cull: false,
+                    };
+                    paged(build(p, Some(&glint)))
+                } else if p.name == "gbuffers_damagedblock" {
                     paged(build(p, Some(&g.with_depth(false))))
                 } else {
                     paged(build(p, Some(g)))
@@ -2840,6 +2879,7 @@ impl PackPost {
             buffers: &entity_buffers,
             table: Some(layout),
             depth_write: true,
+            depth_equal: false,
             atlas: world.celestial.clone(),
             material_maps: false,
             ids: None,
@@ -2852,6 +2892,7 @@ impl PackPost {
             buffers: &entity_buffers,
             table: None,
             depth_write: false,
+            depth_equal: false,
             atlas: None,
             material_maps: false,
             ids: None,
@@ -2865,6 +2906,7 @@ impl PackPost {
                 buffers: &entity_buffers,
                 table: Some(&geometry.layout),
                 depth_write: true,
+                depth_equal: false,
                 atlas: world.celestial.clone(),
                 material_maps: false,
                 ids: None,
@@ -2872,20 +2914,31 @@ impl PackPost {
             };
             paged(build(p, Some(&g))).map(|pass| (pass, geometry))
         });
-        // Translucent held items, drawn from the hand's own buffer.
-        let hand_water = post.hand_water.and_then(|p| {
-            let (_, geometry) = hand.as_ref()?;
-            let g = Geometry {
-                buffers: &entity_buffers,
-                table: Some(&geometry.layout),
-                depth_write: true,
-                atlas: world.celestial.clone(),
-                material_maps: false,
-                ids: None,
-                cull: false,
-            };
-            paged(build(p, Some(&g)))
-        });
+        // Translucent held items, and the glint over held items (its own texture, no depth
+        // writes), when the pack draws the hand.
+        let hand_more = match &hand {
+            Some((_, geometry)) => {
+                let g = |atlas, depth_write| Geometry {
+                    buffers: &entity_buffers,
+                    table: Some(&geometry.layout),
+                    depth_write,
+                    depth_equal: !depth_write,
+                    atlas,
+                    material_maps: false,
+                    ids: None,
+                    cull: false,
+                };
+                let glint = world.glint.as_ref().map(|t| t[0].clone());
+                [
+                    post.hand_water
+                        .and_then(|p| paged(build(p, Some(&g(world.celestial.clone(), true))))),
+                    post.hand_glint
+                        .zip(glint)
+                        .and_then(|(p, t)| paged(build(p, Some(&g(Some(t), false))))),
+                ]
+            }
+            None => [None, None],
+        };
         let weather = post
             .weather
             .zip(weather_geometry.as_ref())
@@ -2904,6 +2957,7 @@ impl PackPost {
             buffers: &line_buffers,
             table: None,
             depth_write: false,
+            depth_equal: false,
             atlas: None,
             material_maps: false,
             ids: None,
@@ -2995,6 +3049,12 @@ impl PackPost {
             "block entities",
             "translucent entities",
             "particles",
+            "block breaking cracks",
+            "beacon beams",
+            "the item glint",
+            "the armour glint",
+            "translucent particles",
+            "translucent block entities",
         ];
         if let Some(l) = &lines {
             notes.push(format!("the block outline draws with {}", l.name));
@@ -3005,8 +3065,13 @@ impl PackPost {
         if let Some((h, _)) = &hand {
             notes.push(format!("the hand draws with {}", h.name));
         }
-        if let Some(h) = &hand_water {
-            notes.push(format!("translucent held items draw with {}", h.name));
+        for (part, pass) in ["translucent held items", "the held items' glint"]
+            .iter()
+            .zip(&hand_more)
+        {
+            if let Some(p) = pass {
+                notes.push(format!("{part} draw with {}", p.name));
+            }
         }
         if let Some([w, _]) = &weather {
             notes.push(format!("rain and snow draw with {}", w.name));
@@ -3064,7 +3129,7 @@ impl PackPost {
             .chain(&lines)
             .chain(weather.iter().flatten())
             .chain(hand.iter().map(|h| &h.0))
-            .chain(&hand_water)
+            .chain(hand_more.iter().flatten())
         };
         let shadow_targets = shadow_formats.map(|f| {
             let colors = every_pass().fold(0u16, |m, p| {
@@ -3118,7 +3183,7 @@ impl PackPost {
                 .chain(&water)
                 .chain(weather.iter().take(1).flatten())
                 .chain(hand.iter().map(|h| &h.0))
-                .chain(&hand_water)
+                .chain(hand_more.iter().flatten())
                 .find(touched)
                 .map(|_| true)
                 .or_else(|| passes.iter().find(touched).map(|_| true));
@@ -3312,7 +3377,7 @@ impl PackPost {
             weather_draw: None,
             weather_generation: 0,
             hand,
-            hand_water,
+            hand_more,
             depth1,
             depth2,
             water_mask,
@@ -4279,6 +4344,7 @@ impl PackPost {
         rest: &mut Vec<super::Vertex>,
         skin: Option<&super::entity_skin::SkinFrame>,
         motion: (&[(u32, u64)], &[u32]),
+        glint_ticks: f32,
     ) {
         self.portal_rect = portal;
         let shadow = self.shadow_casters();
@@ -4300,6 +4366,7 @@ impl PackPost {
             rest,
             skin,
             motion,
+            glint_ticks,
         );
     }
 
@@ -4383,7 +4450,8 @@ impl PackPost {
         }
     }
 
-    /// The first-person hand and held items, with `gbuffers_hand` at the hand's projection.
+    /// The first-person hand and held items, with `gbuffers_hand` at the hand's projection, then
+    /// the glint over its opaque items.
     fn draw_hand(
         &mut self,
         device: &wgpu::Device,
@@ -4404,37 +4472,84 @@ impl PackPost {
             frame.depth_far,
         ) * unspin;
         geometry.prepare(device, queue, frame.hand, frame.hand_items, projection);
-        if geometry.quads > 0 {
-            let group = self.bind(device, queue, encoder, &mut pass, size);
-            {
-                let mut rp = self.begin(encoder, &pass);
-                rp.set_pipeline(pass.render());
-                rp.set_bind_group(0, &group, &[]);
-                if pass.buffers
-                    && let Some(g) = &self.buffers.group
-                {
-                    rp.set_bind_group(4, g, &[]);
-                }
-                rp.set_bind_group(1, &geometry.group, &[]);
-                rp.set_vertex_buffer(0, geometry.vertices());
-                rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
-                // The arm and each held item: their own `currentRenderedItemId`. Translucent
-                // quads wait for `gbuffers_hand_water` when the pack has one.
-                let late = self.hand_water.is_some();
-                let runs = geometry
-                    .runs
-                    .iter()
-                    .chain(geometry.translucent_runs.iter().filter(|_| !late));
-                for &(first, quads, offset) in runs {
-                    if pass.draw {
-                        rp.set_bind_group(2, &geometry.slot_group, &[offset]);
-                    }
-                    rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
-                }
-            }
-            self.mips_valid &= !pass.written;
+        // Translucent quads (and their glint) wait for `gbuffers_hand_water` when the pack has one.
+        let late = self.hand_more[0].is_some();
+        let with_late = |runs: [&Vec<(u32, u32, u32)>; 2]| {
+            let mut all = runs[0].clone();
+            all.extend(runs[1].iter().filter(|_| !late));
+            all
+        };
+        let runs = with_late([&geometry.runs, &geometry.translucent_runs]);
+        self.draw_hand_runs(device, queue, encoder, size, &mut pass, &geometry, &runs);
+        if let Some(mut glint) = self.hand_more[1].take() {
+            let runs = with_late([&geometry.glint_runs[0], &geometry.glint_runs[1]]);
+            self.draw_hand_runs(device, queue, encoder, size, &mut glint, &geometry, &runs);
+            self.hand_more[1] = Some(glint);
         }
         self.hand = Some((pass, geometry));
+    }
+
+    /// After deferred: translucent held items (`gbuffers_hand_water`), then the glint over them.
+    fn draw_hand_translucent(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        size: [u32; 2],
+    ) {
+        if self.hand_more[0].is_none() {
+            return;
+        }
+        let Some((pass, geometry)) = self.hand.take() else {
+            return;
+        };
+        for i in 0..2 {
+            if let Some(mut more) = self.hand_more[i].take() {
+                let runs = [&geometry.translucent_runs, &geometry.glint_runs[1]][i];
+                self.draw_hand_runs(device, queue, encoder, size, &mut more, &geometry, runs);
+                self.hand_more[i] = Some(more);
+            }
+        }
+        self.hand = Some((pass, geometry));
+    }
+
+    /// `runs` (first quad, quads, slot offset) of the hand's vertices with `pass`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_hand_runs(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        size: [u32; 2],
+        pass: &mut Pass,
+        geometry: &super::pack_hand::PackHand,
+        runs: &[(u32, u32, u32)],
+    ) {
+        if runs.is_empty() {
+            return;
+        }
+        let group = self.bind(device, queue, encoder, pass, size);
+        {
+            let mut rp = self.begin(encoder, pass);
+            rp.set_pipeline(pass.render());
+            rp.set_bind_group(0, &group, &[]);
+            if pass.buffers
+                && let Some(g) = &self.buffers.group
+            {
+                rp.set_bind_group(4, g, &[]);
+            }
+            rp.set_bind_group(1, &geometry.group, &[]);
+            rp.set_vertex_buffer(0, geometry.vertices());
+            rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
+            // The arm and each held item: their own `currentRenderedItemId`.
+            for &(first, quads, offset) in runs {
+                if pass.draw {
+                    rp.set_bind_group(2, &geometry.slot_group, &[offset]);
+                }
+                rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
+            }
+        }
+        self.mips_valid &= !pass.written;
     }
 
     /// Whether the pack draws the first-person hand itself.
@@ -4552,51 +4667,8 @@ impl PackPost {
             terrain,
         );
         self.draw_entities(device, queue, encoder, size, true);
-        self.draw_hand_water(device, queue, encoder, size);
+        self.draw_hand_translucent(device, queue, encoder, size);
         self.draw_weather(device, queue, encoder, size);
-    }
-
-    /// The hand's translucent quads (uploaded by `draw_hand` this frame), with
-    /// `gbuffers_hand_water`.
-    fn draw_hand_water(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        size: [u32; 2],
-    ) {
-        let Some(mut pass) = self.hand_water.take() else {
-            return;
-        };
-        let hand = self.hand.take();
-        if let Some((_, geometry)) = hand
-            .as_ref()
-            .filter(|(_, g)| g.quads > 0 && !g.translucent_runs.is_empty())
-        {
-            let group = self.bind(device, queue, encoder, &mut pass, size);
-            {
-                let mut rp = self.begin(encoder, &pass);
-                rp.set_pipeline(pass.render());
-                rp.set_bind_group(0, &group, &[]);
-                if pass.buffers
-                    && let Some(g) = &self.buffers.group
-                {
-                    rp.set_bind_group(4, g, &[]);
-                }
-                rp.set_bind_group(1, &geometry.group, &[]);
-                rp.set_vertex_buffer(0, geometry.vertices());
-                rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &(first, quads, offset) in &geometry.translucent_runs {
-                    if pass.draw {
-                        rp.set_bind_group(2, &geometry.slot_group, &[offset]);
-                    }
-                    rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
-                }
-            }
-            self.mips_valid &= !pass.written;
-        }
-        self.hand = hand;
-        self.hand_water = Some(pass);
     }
 
     /// The rain, then the snow, `set_weather` gave for this frame, with `gbuffers_weather`.
@@ -4786,7 +4858,7 @@ impl PackPost {
             .chain(&mut self.lines)
             .chain(self.weather.iter_mut().flatten())
             .chain(self.hand.iter_mut().map(|h| &mut h.0))
-            .chain(&mut self.hand_water)
+            .chain(self.hand_more.iter_mut().flatten())
             .chain(&mut self.shadow_terrain)
             .chain(&mut self.shadow_water)
             .chain(&mut self.shadow_comp);

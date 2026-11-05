@@ -180,6 +180,7 @@ fn pack(
             celestial: None,
             gui_size: [1, 1],
             clouds: None,
+            glint: None,
             weather: true,
             hand: false,
         },

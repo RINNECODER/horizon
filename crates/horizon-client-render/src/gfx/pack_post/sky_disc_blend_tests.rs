@@ -52,6 +52,7 @@ fn picture(gpu: &Gpu, blend: &str) -> Vec<[u8; 4]> {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

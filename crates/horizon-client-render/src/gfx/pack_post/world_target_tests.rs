@@ -303,6 +303,7 @@ fn pack_with(
             clouds: None,
             weather: false,
             hand: false,
+            glint: None,
         },
         &Default::default(),
     )

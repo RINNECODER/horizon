@@ -229,6 +229,17 @@ const PARTICLES: [&str; 4] = [
 /// probe pack of ours (#10490).
 pub const CELESTIAL_BLEND: Blend = [Factor::SrcAlpha, Factor::One, Factor::One, Factor::Zero];
 
+/// `gbuffers_armor_glint` and its fallbacks (the shaders.properties reference): the
+/// enchantment glint over items and armour.
+const ARMOR_GLINT: [&str; 3] = [
+    "gbuffers_armor_glint",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
+/// Vanilla's glint blend (`BlendFunction.GLINT`): the glint's colour, scaled by itself, added.
+pub const GLINT_BLEND: Blend = [Factor::SrcColor, Factor::One, Factor::Zero, Factor::One];
+
 const GROUPS: [(Group, &str); 6] = [
     (Group::Setup, "setup"),
     (Group::Begin, "begin"),
@@ -500,6 +511,11 @@ pub struct Post {
     pub particles: Option<PostProgram>,
     /// The translucent particle variant for explicit mixed ordering, when it loads.
     pub particles_translucent: Option<PostProgram>,
+    /// What draws the enchantment glint over entities' items and armour, and over held items
+    /// (`hand_glint`), blended over what they cover.
+    pub glint: Option<PostProgram>,
+    pub armor_glint: Option<PostProgram>,
+    pub hand_glint: Option<PostProgram>,
     /// What draws beacon and End gateway beams: blended, with the translucent entity parts
     /// (before deferred unless `separateEntityDraws`).
     pub beacon_beam: Option<PostProgram>,
@@ -586,6 +602,12 @@ impl Post {
             &self.clouds,
             &self.weather,
             &self.hand,
+            &self.particles_translucent,
+            &self.glint,
+            &self.armor_glint,
+            &self.hand_glint,
+            &self.hand_water,
+            &self.block_translucent,
             &self.shadow,
             &self.shadow_water,
             &self.shadow_entities,
@@ -691,6 +713,10 @@ pub struct GameInputs {
     /// `terrain` with both parts in one draw (`GbuffersInputs::parts`): given, a pack drawing
     /// both with one program draws them in one pass.
     pub terrain_one_pass: Option<GbuffersInputs>,
+    /// The enchantment glint over entities' items and armour (`entities`' vertices, the glint's
+    /// UV and texture matrix) and over held items (`hand`'s).
+    pub glint: Option<GbuffersInputs>,
+    pub hand_glint: Option<GbuffersInputs>,
     /// Terrain read vertex by vertex, for a shadow program with a geometry stage.
     pub terrain_geometry: Option<crate::GeometryInputs>,
     /// Entities and block entities read vertex by vertex, for the same.
@@ -745,6 +771,9 @@ pub fn load_post(
         entities_translucent: None,
         particles: None,
         particles_translucent: None,
+        glint: None,
+        armor_glint: None,
+        hand_glint: None,
         beacon_beam: None,
         damaged_block: None,
         clouds: None,
@@ -949,6 +978,16 @@ pub fn load_post(
     let particles_translucent = mixed
         .then(|| translucent(&["gbuffers_particles_translucent"], 0.1, &mut gbuffers_dyn))
         .flatten();
+    // The glint blends as vanilla's does, over the item or armour drawn before it; one program
+    // for each glint texture (the item's, the armour's).
+    let mut glint = |inputs: Option<&GbuffersInputs>| {
+        gbuffers_dyn(&ARMOR_GLINT, inputs?).map(|mut p| {
+            p.blend = blend(properties, &p.name).unwrap_or(Some(GLINT_BLEND));
+            p
+        })
+    };
+    let (item_glint, armor_glint) = (glint(inputs.glint.as_ref()), glint(inputs.glint.as_ref()));
+    let hand_glint = glint(inputs.hand_glint.as_ref());
     let beacon_beam = translucent(&BEACON_BEAM, 0.0, &mut gbuffers_dyn);
     // Clouds blend, as vanilla's do (OQ-23).
     let clouds = inputs
@@ -1108,6 +1147,9 @@ pub fn load_post(
     loader.post.entities_translucent = entities_translucent;
     loader.post.particles = particles;
     loader.post.particles_translucent = particles_translucent;
+    loader.post.glint = item_glint;
+    loader.post.armor_glint = armor_glint;
+    loader.post.hand_glint = hand_glint;
     loader.post.beacon_beam = beacon_beam;
     loader.post.damaged_block = damaged_block;
     loader.post.clouds_off = properties.get("clouds").is_some_and(|v| v.trim() == "off");
@@ -1164,7 +1206,12 @@ fn load_shadow(
         &post.clouds,
         &post.weather,
         &post.hand,
+        &post.particles_translucent,
+        &post.glint,
+        &post.armor_glint,
+        &post.hand_glint,
         &post.hand_water,
+        &post.block_translucent,
     ];
     // A program's compute stages count as its other stages do: Iris 1.11.7 drew the shadow map
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
@@ -3356,9 +3403,11 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             clouds: Some(inputs.clone()),
             weather: Some(inputs.clone()),
             lines: Some(inputs.clone()),
-            hand: Some(inputs),
             terrain_parts: None,
             terrain_one_pass: None,
+            hand: Some(inputs.clone()),
+            glint: Some(inputs.clone()),
+            hand_glint: Some(inputs),
             terrain_geometry: None,
             entity_geometry: None,
         };
@@ -3460,6 +3509,41 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             "particles.ordering = before\nseparateEntityDraws = true\nbeacon.beam.depth = true\n",
             &macros,
         );
+        // The glint falls back to gbuffers_textured, with vanilla's glint blend.
+        for glint in [&post.glint, &post.armor_glint, &post.hand_glint] {
+            let glint = glint.as_ref().unwrap();
+            assert_eq!(
+                (glint.name.as_str(), glint.blend),
+                ("gbuffers_textured", Some(GLINT_BLEND))
+            );
+        }
+        // Translucent block entity parts fall back to gbuffers_block's chain, blended.
+        let block = post.block_translucent.as_ref().unwrap();
+        assert_eq!(
+            (block.name.as_str(), block.blend),
+            ("gbuffers_terrain", Some(TRANSLUCENT_BLEND))
+        );
+        // Translucent held items fall back to the hand's chain, after deferred, blended.
+        let hand_water = post.hand_water.as_ref().unwrap();
+        assert_eq!(
+            (hand_water.name.as_str(), hand_water.group, hand_water.blend),
+            (
+                "gbuffers_textured",
+                Group::Translucent,
+                Some(TRANSLUCENT_BLEND)
+            )
+        );
+        // Translucent particles draw apart only under `particles.ordering=mixed`: after
+        // deferred, the others before it.
+        assert!(post.particles_translucent.is_none());
+        let mixed = Properties::parse("particles.ordering = mixed\n", &macros);
+        let post = load_post(&pack, "", &mixed, &macros, &inputs);
+        let translucent = post.particles_translucent.as_ref().unwrap();
+        assert_eq!(
+            (translucent.name.as_str(), translucent.blend),
+            ("gbuffers_textured", Some(TRANSLUCENT_BLEND))
+        );
+        assert!(!post.particles_late);
         let post = load_post(&pack, "", &ordering, &macros, &inputs);
         assert!(!post.particles_late && post.translucent_late && post.beam_depth);
         let properties = Properties::parse(

@@ -44,6 +44,7 @@ fn an_r11f_image_is_stored_into_and_read_back() {
             celestial: None,
             gui_size: SIZE,
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

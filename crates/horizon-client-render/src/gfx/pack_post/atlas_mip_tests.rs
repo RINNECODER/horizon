@@ -96,6 +96,7 @@ fn the_atlas_blends_its_two_nearest_levels() {
             celestial: None,
             gui_size: [16, 16],
             clouds: None,
+            glint: None,
             weather: false,
             hand: false,
         },

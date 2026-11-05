@@ -81,6 +81,7 @@ fn shadow_pass_draws_terrain_back_faces() {
             buffers: &layouts,
             table: None,
             depth_write: true,
+            depth_equal: false,
             atlas: None,
             ids: None,
             cull: true,

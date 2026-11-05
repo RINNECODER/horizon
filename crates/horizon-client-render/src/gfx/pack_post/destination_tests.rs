@@ -243,6 +243,7 @@ impl Fixture {
                 clouds: None,
                 weather: false,
                 hand: false,
+                glint: None,
             },
             &Default::default(),
         )

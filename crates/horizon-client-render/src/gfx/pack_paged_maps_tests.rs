@@ -108,6 +108,7 @@ void main() {
             buffers: &[],
             table: None,
             depth_write: true,
+            depth_equal: false,
             atlas: None,
             material_maps: false,
             ids: None,
@@ -117,6 +118,7 @@ void main() {
         celestial: None,
         gui_size: [1, 1],
         clouds: None,
+        glint: None,
         weather: false,
         hand: false,
     };

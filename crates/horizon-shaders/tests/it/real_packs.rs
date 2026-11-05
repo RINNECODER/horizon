@@ -196,6 +196,11 @@ fn real_packs_read() {
                     }),
                     ..terrain.clone()
                 }),
+                glint: Some(terrain.clone()),
+                hand_glint: Some(horizon_shaders::GbuffersInputs {
+                    item_id_declared: true,
+                    ..terrain.clone()
+                }),
                 terrain_geometry: Some(horizon_shaders::GeometryInputs {
                     inputs: horizon_shaders::GbuffersInputs {
                         declarations: format!(
