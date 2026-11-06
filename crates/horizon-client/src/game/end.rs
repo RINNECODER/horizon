@@ -1205,6 +1205,9 @@ impl Game<'_> {
             if rel.length_squared() > 256.0 * 256.0 {
                 continue;
             }
+            // Each crystal starts its own run, and its spike beam (below) another: a pack's
+            // programs leave a run holding a beam quad to Horizon whole (pack_entities `plain`).
+            self.mark_entity(out.len(), "minecraft:end_crystal");
             let age = crystal.time as f32 + partial;
             let light = self.world.light(
                 feet.x.floor() as i32,
@@ -1242,6 +1245,7 @@ impl Game<'_> {
                 );
                 let delta = feet - from
                     + glam::DVec3::new(0.0, f64::from(horizon_client::end_crystal::y(age)), 0.0);
+                self.mark_entity(out.len(), "minecraft:end_crystal");
                 self.crystal_beam(from, delta, age, camera, out);
             }
         }
