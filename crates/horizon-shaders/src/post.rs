@@ -513,6 +513,10 @@ pub struct Post {
     /// terrain to the game.
     pub terrain_undrawn: bool,
     pub water_undrawn: bool,
+    /// `dh_terrain` and `dh_water` (Iris's Distant Horizons support): what draws the far tiles'
+    /// solid and translucent quads, each before its near kind, which then leaves the tiles out.
+    pub dh_terrain: Option<PostProgram>,
+    pub dh_water: Option<PostProgram>,
     /// What draws the sky (disc, sunset, stars, void) before terrain.
     pub sky: Option<PostProgram>,
     /// What draws the sun and moon, between the sunset and the stars.
@@ -616,6 +620,8 @@ impl Post {
             &self.terrain,
             &self.terrain_cutout,
             &self.water,
+            &self.dh_terrain,
+            &self.dh_water,
             &self.sky,
             &self.sky_textured,
             &self.entities,
@@ -769,6 +775,17 @@ pub struct GameInputs {
     /// `gbuffers_skytextured` with a geometry stage.
     pub sky_geometry: Option<crate::GeometryInputs>,
     pub celestial_geometry: Option<crate::GeometryInputs>,
+    /// Far terrain's tiles for `dh_terrain` and `dh_water`, when the game draws them.
+    pub far_terrain: Option<FarInputs>,
+}
+
+/// What `dh_terrain` and `dh_water` read: `terrain`'s draws (sections and far tiles together)
+/// with the tiles' own inputs (`dhMaterialId`, the block's colour) and only the tiles kept.
+#[derive(Clone, Debug)]
+pub struct FarInputs {
+    pub inputs: GbuffersInputs,
+    /// Appended to `after` of the near programs a DH program takes the tiles from: drops them.
+    pub near_only: String,
 }
 
 /// Loads the post-processing programs of `folder` and, for the geometry `inputs` describes, the
@@ -811,6 +828,8 @@ pub fn load_post(
         water: None,
         terrain_undrawn: false,
         water_undrawn: false,
+        dh_terrain: None,
+        dh_water: None,
         sky: None,
         sky_textured: None,
         entities: None,
@@ -1143,6 +1162,32 @@ pub fn load_post(
             p
         });
     if let Some(terrain) = &inputs.terrain {
+        // Distant Horizons' programs, as Iris has them with DH: the far tiles through dh_terrain
+        // and dh_water (no fallback: without one, the near program draws the tiles too), the near
+        // program of that kind then leaving them out.
+        let far = inputs.far_terrain.as_ref();
+        let dh_terrain =
+            far.and_then(|f| gbuffers(&["dh_terrain"], Group::Gbuffers, &f.inputs, None));
+        let dh_water = far
+            .and_then(|f| gbuffers(&["dh_water"], Group::Translucent, &f.inputs, None))
+            .map(|mut p| {
+                p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
+                p
+            });
+        let near = |inputs: &GbuffersInputs, dh: bool| {
+            let mut inputs = inputs.clone();
+            if let Some(f) = far.filter(|_| dh) {
+                inputs.after.push_str(&f.near_only);
+            }
+            inputs
+        };
+        let water_inputs = near(terrain, dh_water.is_some());
+        let near_parts = inputs
+            .terrain_parts
+            .as_ref()
+            .map(|parts| parts.each_ref().map(|p| near(p, dh_terrain.is_some())));
+        let terrain_parts = &near_parts;
+        let terrain = &near(terrain, dh_terrain.is_some());
         // Cutout terrain's alpha test, unless `alphaTest.*` says otherwise (3.2): alpha above
         // 0.5, which `alphaTestRef` reads. Iris 1.11.7 with probe packs of ours (#9307), through
         // gbuffers_terrain alone or gbuffers_terrain_cutout: cutout fragments written with alpha
@@ -1165,7 +1210,7 @@ pub fn load_post(
         // terrain gets no default alpha test, and alphaTestRef 0: in those probes Iris kept
         // solid fragments written with alpha 0.05, through either program, and also 0.0
         // through gbuffers_terrain alone or gbuffers_terrain_solid (#9307).
-        let parts = inputs.terrain_parts.as_ref().filter(|_| split_terrain);
+        let parts = terrain_parts.as_ref().filter(|_| split_terrain);
         let mut lone = None;
         let (solid, terrain_cutout) = match parts {
             Some([solid, cut]) => {
@@ -1207,7 +1252,7 @@ pub fn load_post(
             }
             None => match &inputs.terrain_one_pass {
                 Some(both) => {
-                    let mut both = both.clone();
+                    let mut both = near(both, dh_terrain.is_some());
                     if let Some(parts) = &mut both.parts {
                         parts.cutout_alpha_test = parts.cutout_alpha_test.or(cut);
                     }
@@ -1235,11 +1280,13 @@ pub fn load_post(
             Group::Translucent,
             &GbuffersInputs {
                 water_mask: true,
-                ..terrain.clone()
+                ..water_inputs
             },
             terrain_geometry,
         );
         loader.post.notes.extend(lone);
+        loader.post.dh_terrain = dh_terrain;
+        loader.post.dh_water = dh_water;
         loader.post.terrain_undrawn = !has_solid && !has_cutout;
         loader.post.water_undrawn = !WATER.iter().any(|n| loader.has(n));
         for (undrawn, part) in [
