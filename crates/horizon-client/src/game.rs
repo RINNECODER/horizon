@@ -9520,10 +9520,11 @@ impl Game<'_> {
         // The dragon is drawn in every dimension, as any entity: a dragon
         // summoned outside the End (the server's AddEntity) is shown too.
         if !title {
-            let mut dragon = Vec::new();
-            self.dragon_geometry(camera, alpha, &mut dragon, &mut additive);
-            self.dragon_fireball_geometry(camera, alpha, &mut dragon);
-            entities.extend(dragon);
+            // Their own spans: unmarked, they would join the last one (cracks, a mod's quads).
+            self.mark_entity(entities.len(), "minecraft:ender_dragon");
+            self.dragon_geometry(camera, alpha, &mut entities, &mut additive);
+            self.mark_entity(entities.len(), "minecraft:dragon_fireball");
+            self.dragon_fireball_geometry(camera, alpha, &mut entities);
         }
         pr.lap("pr_dragon_bolts");
         let (celestial, stars) = if title {
@@ -9567,6 +9568,7 @@ impl Game<'_> {
         if !title {
             self.end_geometry(camera, &mut entities);
         }
+        self.mark_stage(entities.len(), "NONE");
         self.outline_fill(&outline, camera, &mut entities);
         pr.lap("pr_screen_end");
         let weather = if !title && self.can_have_weather() && self.settings.horizon.weather {

@@ -1178,7 +1178,9 @@ impl Game<'_> {
     /// eyes of ender, as camera-relative entity geometry (End portals and
     /// gateways are block entities).
     pub(super) fn end_geometry(&self, camera: glam::DVec3, out: &mut Vec<Vertex>) {
+        self.mark_entity(out.len(), "minecraft:end_crystal");
         self.end_crystal_geometry(camera, out);
+        self.mark_entity(out.len(), "minecraft:eye_of_ender");
         self.eye_geometry(camera, out);
     }
 
