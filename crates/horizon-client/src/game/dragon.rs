@@ -3459,7 +3459,9 @@ impl Game<'_> {
                 v.layer |= u32::from(horizon_client::mesher::VERY_BRIGHT) << 16;
             }
         }
-        // The healing beam to the nearest crystal.
+        // The healing beam to the nearest crystal, in a run of its own: a pack's programs
+        // leave a run holding a beam quad to Horizon (pack_entities `plain`), body and all.
+        self.mark_entity(out.len(), "minecraft:ender_dragon");
         if let Some(c) = d.nearest_crystal.and_then(|i| self.crystals.get(i)) {
             let bob = f64::from(horizon_client::end_crystal::y(c.time as f32 + a));
             let to = glam::DVec3::new(c.position.x, c.position.y + bob, c.position.z);
