@@ -28,6 +28,18 @@ pub(super) fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         write_report(&game)?;
         return game.error.take().map_or(Ok(()), Err);
     }
+    // macOS App Naps a hidden window's process: the frame limiter's few-ms sleeps then
+    // last tens of ms and an `--offscreen` bench reads 20-40 FPS at 4 ms CPU and 7 ms GPU.
+    // Nobody sees that window, but an agent measures and drives it.
+    #[cfg(target_os = "macos")]
+    let _awake = game.options.offscreen.then(|| {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
+                | NSActivityOptions::LatencyCritical,
+            &NSString::from_str("offscreen game driven by an agent"),
+        )
+    });
     let mut split = split::Split::new(game);
     let result = EventLoop::new()?.run_app(&mut split);
     game = split.host;
