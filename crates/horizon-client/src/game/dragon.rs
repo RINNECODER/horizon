@@ -3435,12 +3435,23 @@ impl Game<'_> {
         // `RenderTypes.eyes` has an `OitPipelineSet`: improved transparency
         // moves the tagged quads into its stages (the HDR tier is the eyes'
         // shine, `mobs::render::EYES_TIER`).
-        for v in &mut eye_quads {
-            v.layer = 2
-                | horizon_client::gfx::OIT_ENTITY
-                | u32::from(horizon_client::mesher::BRIGHT) << 16;
+        // Under a shader pack they are the dragon's own quads, tagged for its
+        // `gbuffers_spidereyes` as the mobs' eyes layers are (`mobs::render`).
+        if self.pack_ids.is_some() {
+            for v in &mut eye_quads {
+                v.normal = [0; 4];
+                v.layer = u32::from(horizon_client::mesher::BRIGHT) << 16
+                    | horizon_client::gfx::EYES_ENTITY;
+            }
+            out.extend(eye_quads);
+        } else {
+            for v in &mut eye_quads {
+                v.layer = 2
+                    | horizon_client::gfx::OIT_ENTITY
+                    | u32::from(horizon_client::mesher::BRIGHT) << 16;
+            }
+            additive.extend(eye_quads);
         }
-        additive.extend(eye_quads);
         if death > 0.0 {
             let rays = additive.len();
             self.dragon_rays(rays_base, death / 200.0, additive);
