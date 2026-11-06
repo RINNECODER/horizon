@@ -19,7 +19,7 @@ impl Game<'_> {
     /// or the server stops, not saved: keep what you hold (a level
     /// attachment) and hold it again in `native_level_load`. True when the
     /// set of owners changed; false for an owner without a namespace, a chunk
-    /// past the world's edge (as `/forceload` refuses it) and off a server. API @API:chunk_tickets@.
+    /// past the world's edge (as `/forceload` refuses it) and off a server. API 416.
     pub(super) fn native_force_chunk(&mut self, owner: &str, chunk: [i32; 2], hold: bool) -> bool {
         let namespaced = owner
             .split_once(':')
@@ -56,7 +56,7 @@ impl Game<'_> {
     }
 
     /// The chunks of the level in place `owner` holds (`native_force_chunk`),
-    /// sorted. API @API:chunk_tickets@.
+    /// sorted. API 416.
     pub(super) fn native_forced_chunks(&self, owner: &str) -> Vec<[i32; 2]> {
         let mut held: Vec<[i32; 2]> = self
             .mod_chunk_tickets

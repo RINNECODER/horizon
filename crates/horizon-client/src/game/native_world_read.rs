@@ -94,7 +94,7 @@ impl Game<'_> {
     /// one) is in block tag `tag` (`minecraft:logs`, or a mod's
     /// `create:fan_transparent`) of the server's merged tags, as
     /// `BlockState.is(TagKey)`: what `native_server_block_in_tag` answers for
-    /// a state of that block, from any server hook. API @API:host_bridge@.
+    /// a state of that block, from any server hook. API 412.
     #[allow(dead_code)]
     pub(super) fn native_block_name_in_tag(
         &self,
@@ -137,7 +137,7 @@ impl Game<'_> {
     /// is no fluid or it doesn't move; none where the chunk isn't loaded or
     /// the dimension isn't available (a client has only the level it is in,
     /// a server also its parked ones), so a caller can keep its last answer.
-    /// API @API:fluid_flow@.
+    /// API 421.
     #[allow(dead_code)]
     pub(super) fn native_fluid_flow(&self, dimension: &str, pos: [i32; 3]) -> Option<[f64; 3]> {
         let dim = match dimension {

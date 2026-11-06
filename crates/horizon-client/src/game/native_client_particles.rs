@@ -29,7 +29,7 @@ impl Game<'_> {
     /// color or size values in `velocity`. Normal distance, settings and population
     /// limits still apply. True means submitted, not necessarily visible: an unknown
     /// provider or missing sprite set draws nothing. False on a server, without a
-    /// client player/level, or for non-finite numeric input. API @API:client_particles@.
+    /// client player/level, or for non-finite numeric input. API 450.
     pub(super) fn native_add_particle(
         &mut self,
         options: &ParticleOptions,

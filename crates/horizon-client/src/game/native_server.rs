@@ -959,7 +959,7 @@ impl Game<'_> {
     /// commands players may run are rebuilt, and every player on the server is
     /// sent their tree again, after `native_player_commands_sent`. Nothing
     /// happens where no world is open to players, and nothing for a server
-    /// whose mods never call it. API @API:refresh_commands@.
+    /// whose mods never call it. API 444.
     pub(super) fn native_refresh_commands(&mut self) {
         self.native_commands_refresh = true;
     }
