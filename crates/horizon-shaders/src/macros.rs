@@ -87,7 +87,7 @@ pub const RENDER_STAGES: [&str; 24] = [
     "HAND_TRANSLUCENT",
 ];
 
-/// `DH_BLOCK_*`, each its index: Distant Horizons' block materials.
+/// `DH_BLOCK_*`, each its index: Distant Horizons' block materials (`dhMaterialId`'s values).
 pub const DH_BLOCK_MATERIALS: [&str; 16] = [
     "UNKNOWN",
     "LEAVES",
@@ -176,6 +176,12 @@ impl Macros {
         self.define("MC_GL_VENDOR_OTHER", "");
         self.define("MC_GL_RENDERER_OTHER", "");
         self.define("MC_MIPMAP_LEVEL", mipmap_levels.to_string());
+    }
+
+    /// `DISTANT_HORIZONS`, which Iris defines while the DH mod draws far terrain: here, while
+    /// Horizon's far tiles draw through the pack's `dh_*` programs. `DH_BLOCK_*` are always on.
+    pub fn define_distant_horizons(&mut self) {
+        self.define("DISTANT_HORIZONS", "");
     }
 
     /// A note for each feature `iris.features.required` names that Horizon lacks; a name matches

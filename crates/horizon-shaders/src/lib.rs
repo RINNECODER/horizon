@@ -44,15 +44,16 @@ pub use config::{
 pub use custom::{Custom, Val};
 pub use discover::{Found, discover};
 pub use lang::Lang;
-pub use macros::{MC_VERSION, Macros, RENDER_STAGES, render_stage};
+pub use macros::{DH_BLOCK_MATERIALS, MC_VERSION, Macros, RENDER_STAGES, render_stage};
 pub use options::{
     PackOption, apply as apply_options, chosen_file, chosen_text, options, parse_chosen,
     properties_macros, read_properties, switches_on, value_options, with_options,
 };
 pub use pack::{Pack, PackError};
 pub use post::{
-    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, GameInputs, Group,
-    ImageSize, Post, PostProgram, STARS_BLEND, ShadowCulling, TRANSLUCENT_BLEND, dimension_folder,
+    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, FarInputs, GameInputs,
+    Group, ImageSize, Post, PostProgram, STARS_BLEND, ShadowCulling, TRANSLUCENT_BLEND,
+    dimension_folder,
     dimension_folder_named, load_post,
 };
 pub use preprocess::{Diagnostic, Origin, Preprocessed, preprocess};
