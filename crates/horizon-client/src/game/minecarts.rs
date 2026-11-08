@@ -2609,7 +2609,14 @@ impl Game<'_> {
                     continue;
                 };
                 use horizon_assets::model::Direction as D;
-                let shade: u32 = match face.quad.facing {
+                // A shader pack lighting the faces (`oldLighting` off): the up face's shade on all, as
+                // sections mesh them.
+                let facing = if self.streaming.shader_pack_lighting {
+                    D::Up
+                } else {
+                    face.quad.facing
+                };
+                let shade: u32 = match facing {
                     D::Up => 255,
                     D::Down => 127,
                     D::North | D::South => 204,
