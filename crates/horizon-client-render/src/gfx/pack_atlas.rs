@@ -550,8 +550,9 @@ impl PackAtlas {
 
 /// GLSL: terrain.wgsl's `section_corner` over the arena page (`hz_vertices`), by quad: a
 /// vertex's words as `TerrainVertex` holds them (position, then UV, layer with light, colour),
-/// from vertices below `PACKED_BASE` or a compact record (`mesher/packed.rs`) past it. Records
-/// give back their quad's vertices bit for bit, so packs read either layout alike.
+/// from vertices below `PACKED_BASE`, a compact record (`mesher/packed.rs`) past it, or a far
+/// tile's record (`lod/packed.rs`, `hz_far_corner` = terrain.wgsl's `far_corner`) past
+/// `FAR_BASE`. Records give back their quad's vertices bit for bit, so packs read any layout alike.
 /// `hz_arena_corner`: a vertex's position and UV words; `hz_record_corner`: corner `k`'s of the
 /// record `lo`, `hi`; `hz_record_rest`: its layer-with-light and colour words.
 const CORNER_FN: &str = "void hz_arena_corner(uint hz_av, out uvec3 hz_p, out uint hz_uv) {\n    \
@@ -591,6 +592,23 @@ uvec2 hz_record_rest(uvec3 hz_lo, uvec3 hz_hi, uint hz_k) {\n    \
     uint hz_c = (hz_g * ((hz_t >> 16u) & 255u) / 255u) | ((hz_g * ((hz_t >> 8u) & 255u) / 255u) << 8u)\n        \
         | ((hz_g * (hz_t & 255u) / 255u) << 16u) | hz_alpha;\n    \
     return uvec2((hz_hi.x & 0xffffu) | (hz_pl << 16u), hz_c);\n\
+}\n\
+void hz_far_corner(uvec3 hz_lo, uvec3 hz_hi, uint hz_k, out uvec3 hz_p, out uint hz_uv) {\n    \
+    uint hz_axis = hz_hi.z & 3u;\n    \
+    uint hz_c = ((hz_hi.z >> 2u) & 1u) == 1u ? 3u - hz_k : hz_k;\n    \
+    float hz_plane = float(int(hz_lo.z));\n    \
+    float hz_u0 = float(int(hz_hi.x));\n    \
+    float hz_v0 = float(int(hz_hi.y));\n    \
+    float hz_u1 = hz_u0 + float((hz_hi.z >> 3u) & 0x7ffu);\n    \
+    float hz_v1 = hz_v0 + float((hz_hi.z >> 14u) & 0x7ffu);\n    \
+    float hz_fv = hz_c <= 1u ? hz_v1 : hz_v0;\n    \
+    bool hz_first = hz_c == 0u || hz_c == 3u;\n    \
+    float hz_fu = hz_axis == 2u ? (hz_first ? hz_u1 : hz_u0) : (hz_first ? hz_u0 : hz_u1);\n    \
+    vec3 hz_pos = hz_axis == 1u ? vec3(hz_fu, hz_fv, hz_plane)\n        \
+        : (hz_axis == 2u ? vec3(hz_plane, hz_fv, hz_fu) : vec3(hz_fu, hz_plane, hz_fv));\n    \
+    uvec2 hz_t = uvec2(vec2(hz_fu - hz_u0, hz_v1 - hz_fv) * 32.0);\n    \
+    hz_p = floatBitsToUint(hz_pos);\n    \
+    hz_uv = hz_t.x | (hz_t.y << 16u);\n\
 }\n";
 
 /// GLSL: a flat-drawn vertex's inputs, and its quad's four corners' positions (`hz_cp0`..) and
@@ -605,8 +623,9 @@ const PULL_FLAT: &str = "    uint hz_qv = uint(gl_VertexIndex);\n    \
     bool hz_rec = false;\n    \
     uvec3 hz_lo = uvec3(0u);\n    \
     uvec3 hz_hi = uvec3(0u);\n    \
+    bool hz_far = hz_av >= 0x20000000u;\n    \
     if (hz_av >= 0x10000000u) {\n        \
-        hz_slot = (hz_av - 0x10000000u) >> 2u;\n        \
+        hz_slot = (hz_av - (hz_far ? 0x20000000u : 0x10000000u)) >> 2u;\n        \
         uint hz_rw = hz_slot * 6u;\n        \
         hz_lo = uvec3(hz_vertices[hz_rw], hz_vertices[hz_rw + 1u], hz_vertices[hz_rw + 2u]);\n        \
         hz_hi = uvec3(hz_vertices[hz_rw + 3u], hz_vertices[hz_rw + 4u], hz_vertices[hz_rw + 5u]);\n        \
@@ -616,7 +635,13 @@ const PULL_FLAT: &str = "    uint hz_qv = uint(gl_VertexIndex);\n    \
     uvec3 hz_cp0; uvec3 hz_cp1; uvec3 hz_cp2; uvec3 hz_cp3;\n    \
     uint hz_uv0; uint hz_uv1; uint hz_uv2; uint hz_uv3;\n    \
     uvec2 hz_rest;\n    \
-    if (hz_rec) {\n        \
+    if (hz_rec && hz_far) {\n        \
+        hz_far_corner(hz_lo, hz_hi, 0u, hz_cp0, hz_uv0);\n        \
+        hz_far_corner(hz_lo, hz_hi, 1u, hz_cp1, hz_uv1);\n        \
+        hz_far_corner(hz_lo, hz_hi, 2u, hz_cp2, hz_uv2);\n        \
+        hz_far_corner(hz_lo, hz_hi, 3u, hz_cp3, hz_uv3);\n        \
+        hz_rest = uvec2(hz_lo.y, hz_lo.x);\n    \
+    } else if (hz_rec) {\n        \
         hz_record_corner(hz_lo, hz_hi, 0u, hz_cp0, hz_uv0);\n        \
         hz_record_corner(hz_lo, hz_hi, 1u, hz_cp1, hz_uv1);\n        \
         hz_record_corner(hz_lo, hz_hi, 2u, hz_cp2, hz_uv2);\n        \
