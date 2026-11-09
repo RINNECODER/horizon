@@ -544,7 +544,7 @@ impl Sprites {
                     alpha_cutoff_bias,
                     has_transparent: alphas().any(|&a| a == 0),
                     opaque: alphas().all(|&a| a == 255),
-                    translucent: alphas().any(|&a| a != 0 && a != 255),
+                    translucent: translucent(alphas()),
                     frames,
                 };
                 let tile_name = format!("fusion/{}#{tile}", name.replace(':', "/"));
@@ -650,11 +650,7 @@ impl Sprites {
                 .unwrap_or(0.0) as f32,
             has_transparent: pixels.as_chunks::<4>().0.iter().any(|p| p[3] == 0),
             opaque: pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
-            translucent: pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|p| p[3] != 0 && p[3] != 255),
+            translucent: translucent(pixels.iter().skip(3).step_by(4)),
         })
     }
     /// Give a decoded texture its layer (or the one an identical still has).
@@ -755,6 +751,19 @@ impl Sprites {
 /// A PNG's width, height and pixels as RGBA. From the prepared data file
 /// when it holds the texture: no file opened per texture, nor for its absent
 /// LabPBR maps.
+/// Whether texels with these `alphas` draw in the translucent pass: more than one in 256 of them
+/// is partly transparent. Vanilla 26.3 sends a quad there for a single such texel, but packs made
+/// for the per-block render layers before 26.1 leave stray ones in cutout textures (Conquest
+/// Reforged's leaves: 1 of 4096), and a forest of sorted, blended leaves costs whole frames. A
+/// few such texels drawn as cutout look the same.
+fn translucent<'a>(alphas: impl Iterator<Item = &'a u8>) -> bool {
+    let (mut partial, mut all) = (0usize, 0usize);
+    for &a in alphas {
+        partial += usize::from(a != 0 && a != 255);
+        all += 1;
+    }
+    partial * 256 > all
+}
 pub(crate) fn read_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     let bytes = horizon_core::prepared_files::read(path)?;
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -1023,6 +1032,20 @@ mod tests {
             assert_eq!(sprite_mipmap_limit(levels, 32, 16, 6), levels + 1);
             assert_eq!(sprite_mipmap_limit(levels, 16, 16, 5), levels);
         }
+    }
+    #[test]
+    fn a_few_stray_partial_texels_stay_cutout() {
+        let leaves = |partial: usize| {
+            let mut alphas = vec![0u8; 2048];
+            alphas.resize(4096, 255);
+            alphas[..partial].fill(248);
+            translucent(alphas.iter())
+        };
+        assert!(!leaves(1));
+        assert!(!leaves(16));
+        assert!(leaves(17));
+        assert!(translucent([0, 128, 255, 255].iter()));
+        assert!(!translucent([0, 255].iter()));
     }
     #[test]
     fn files_outside_textures_load_by_path() {

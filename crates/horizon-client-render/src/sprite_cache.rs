@@ -13,7 +13,7 @@ use std::{
 
 const MAGIC: &[u8; 4] = b"HSPR";
 /// Bump when `Decoded` or the decoding in `Sprites::decode` changes.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const FILE: &str = "horizon-sprites.cache";
 
 /// What decoding one texture gives, before it takes a layer.
