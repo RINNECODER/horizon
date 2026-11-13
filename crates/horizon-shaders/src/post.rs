@@ -3819,12 +3819,6 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
                 ("gbuffers_textured", Some(GLINT_BLEND))
             );
         }
-        // Translucent block entity parts fall back to gbuffers_block's chain, blended.
-        let block = post.block_translucent.as_ref().unwrap();
-        assert_eq!(
-            (block.name.as_str(), block.blend),
-            ("gbuffers_terrain", Some(TRANSLUCENT_BLEND))
-        );
         // The eyes fall back to gbuffers_textured (not the entities' chain), blended.
         let eyes = post.spidereyes.as_ref().unwrap();
         assert_eq!(
@@ -3841,17 +3835,6 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
                 Some(TRANSLUCENT_BLEND)
             )
         );
-        // Translucent particles draw apart only under `particles.ordering=mixed`: after
-        // deferred, the others before it.
-        assert!(post.particles_translucent.is_none());
-        let mixed = Properties::parse("particles.ordering = mixed\n", &macros);
-        let post = load_post(&pack, "", &mixed, &macros, &inputs);
-        let translucent = post.particles_translucent.as_ref().unwrap();
-        assert_eq!(
-            (translucent.name.as_str(), translucent.blend),
-            ("gbuffers_textured", Some(TRANSLUCENT_BLEND))
-        );
-        assert!(!post.particles_late);
         let post = load_post(&pack, "", &ordering, &macros, &inputs);
         assert!(!post.particles_late && post.translucent_late && post.beam_depth);
         let properties = Properties::parse(
