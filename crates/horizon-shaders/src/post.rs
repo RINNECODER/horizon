@@ -842,12 +842,18 @@ pub fn load_post(
     let options = crate::with_options(pack, macros);
     for e in &properties.entries {
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
-            match (n.parse(), BufferObject::parse(&e.value)) {
+            // Values take the pack's options and macros, as `image.*` values do.
+            let value = options.expand(&e.value);
+            match (n.parse(), BufferObject::parse(&value)) {
                 (Ok(n), Some(b)) => match buffer_object_file(pack, b) {
                     Ok(b) => _ = post.buffer_objects.insert(n, b),
                     Err(note) => post.notes.push(note),
                 },
-                _ => post.notes.push(format!("`{}`: not a buffer object", e.key)),
+                _ => post.notes.push(format!(
+                    "`{}` = `{}`: not a buffer object",
+                    e.key,
+                    value.trim()
+                )),
             }
             continue;
         }
@@ -2136,6 +2142,30 @@ mod tests {
             assert_eq!(post.images.len(), 1);
             assert_eq!(post.images[0].size, ImageSize::Absolute(expected));
         }
+    }
+
+    #[test]
+    fn buffer_object_sizes_expand_options() {
+        let bytes = crate::pack::tests::zip(&[(
+            "shaders/options.glsl",
+            "#define BYTES 64 // [64 128]\n#define PER_PIXEL true // [true false]\n",
+        )]);
+        let pack = Pack::from_zip_bytes("buffers.zip", bytes).unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse(
+            "bufferObject.0 = BYTES\nbufferObject.1 = BYTES PER_PIXEL 0.5 0.5\n",
+            &macros,
+        );
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(post.buffer_objects[&0], BufferObject::Bytes(64));
+        assert_eq!(
+            post.buffer_objects[&1],
+            BufferObject::PerPixel {
+                bytes: 64,
+                scale: [0.5, 0.5]
+            }
+        );
     }
 
     #[test]
