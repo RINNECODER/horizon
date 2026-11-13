@@ -41,7 +41,8 @@ impl PackImage {
 /// The images `image.*` declares, each made in `backing` of its format; `packed_float`: this
 /// device stores into `Rg11b10Ufloat` (`format`).
 pub(super) fn images(
-    defs: Vec<CustomImage>, packed_float: bool,
+    defs: Vec<CustomImage>,
+    packed_float: bool,
     backing: &dyn Fn(wgpu::TextureFormat) -> wgpu::TextureFormat,
 ) -> Vec<PackImage> {
     defs.into_iter()

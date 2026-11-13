@@ -109,7 +109,10 @@ impl ShadowTargets {
                 if a.texture() != b.texture() {
                     doubled |= 1 << n;
                 }
-                if a.texture().usage().contains(wgpu::TextureUsages::STORAGE_BINDING) {
+                if a.texture()
+                    .usage()
+                    .contains(wgpu::TextureUsages::STORAGE_BINDING)
+                {
                     images.0 |= 1 << n;
                 }
                 if self.scratch[n].is_some() {
@@ -171,14 +174,7 @@ impl ShadowTargets {
             (colors & 1 << n != 0).then(|| {
                 let side = |side: &str| {
                     let label = format!("Shader pack shadowcolor{n} {side}");
-                    target(
-                        device,
-                        &label,
-                        size,
-                        formats[n],
-                        usage(n),
-                    )
-                    .1
+                    target(device, &label, size, formats[n], usage(n)).1
                 };
                 let a = side("A");
                 let b = if doubled & 1 << n != 0 {
