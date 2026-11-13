@@ -67,9 +67,9 @@ mod shadow_faces_tests;
 mod r11f_image_tests;
 
 #[cfg(test)]
-mod work_group_fold_tests;
-#[cfg(test)]
 mod shadowcolor_image_tests;
+#[cfg(test)]
+mod work_group_fold_tests;
 
 #[cfg(test)]
 mod read_write_buffer_tests;
@@ -2648,7 +2648,11 @@ impl PackPost {
         let packed_float = gpu.storable(adapter, wgpu::TextureFormat::Rg11b10Ufloat, features);
         image_defs.retain(|def| {
             let made = pack_images::makeable(device, def, packed_float).and_then(|()| {
-                if gpu.storable(adapter, backing(pack_images::format(def.format, packed_float)), features) {
+                if gpu.storable(
+                    adapter,
+                    backing(pack_images::format(def.format, packed_float)),
+                    features,
+                ) {
                     Ok(())
                 } else {
                     Err("this GPU can't store into its format".into())

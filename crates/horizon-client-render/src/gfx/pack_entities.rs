@@ -332,7 +332,15 @@ impl PackEntities {
             size: 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        }); let table_group = Self::table_group(device, &table, &vertices, &previous, &previous_index, &glint);
+        });
+        let table_group = Self::table_group(
+            device,
+            &table,
+            &vertices,
+            &previous,
+            &previous_index,
+            &glint,
+        );
         let (slots, group) = Self::slot_buffer(device, layout, 64, stride);
         Self {
             vertices,
@@ -380,7 +388,8 @@ impl PackEntities {
         table: &wgpu::BindGroupLayout,
         vertices: &wgpu::Buffer,
         previous: &wgpu::Buffer,
-        index: &wgpu::Buffer, glint: &wgpu::Buffer,
+        index: &wgpu::Buffer,
+        glint: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shader pack entity vertices"),
@@ -397,7 +406,11 @@ impl PackEntities {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: index.as_entire_binding(),
-                }, wgpu::BindGroupEntry { binding: 1, resource: glint.as_entire_binding(), },
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: glint.as_entire_binding(),
+                },
             ],
         })
     }
@@ -676,7 +689,17 @@ impl PackEntities {
                         if let Some(glint) = glint {
                             let overlay = self.scratch[q as usize * 4].layer & 0xffff;
                             let at = posed + q * 4;
-                            self.push_draw(span, at, n * 4, glint, true, false, overlay, false, false);
+                            self.push_draw(
+                                span,
+                                at,
+                                n * 4,
+                                glint,
+                                true,
+                                false,
+                                overlay,
+                                false,
+                                false,
+                            );
                         }
                     }
                 }
@@ -716,7 +739,8 @@ impl PackEntities {
             &self.table,
             &self.vertices,
             &self.previous,
-            &self.previous_index, &self.glint,
+            &self.previous_index,
+            &self.glint,
         );
         if need_slots > have_slots {
             (self.slots, self.group) =

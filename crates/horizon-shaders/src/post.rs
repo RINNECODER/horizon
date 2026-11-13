@@ -1208,7 +1208,10 @@ pub fn load_post(
                     if let Some(parts) = &mut both.parts {
                         parts.cutout_alpha_test = parts.cutout_alpha_test.or(cut);
                     }
-                    (gbuffers(&TERRAIN, Group::Gbuffers, &both, terrain_geometry), None)
+                    (
+                        gbuffers(&TERRAIN, Group::Gbuffers, &both, terrain_geometry),
+                        None,
+                    )
                 }
                 // A game that draws terrain in one part: all of it with the cutout test.
                 None => (
