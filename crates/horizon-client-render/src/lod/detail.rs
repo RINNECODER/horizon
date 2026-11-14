@@ -1,12 +1,12 @@
-//! Reduced far detail.
+//! Far detail.
 use super::*;
 
 impl Lod {
-    /// Reduced far detail (`graphics::FarDetail::Reduced`): the next update
-    /// replans when it changes, and tiles sampled from then on approximate
-    /// wide cells (`GeneratorWorker::lod_grid`).
-    pub fn set_reduced_detail(&mut self, reduced: bool) {
-        if self.reduced_detail != reduced {
+    /// Far detail (`graphics::FarDetail`): the next update replans when it
+    /// changes, tiles are sampled again, and with Reduced tiles sampled from
+    /// then on approximate wide cells (`GeneratorWorker::lod_grid`).
+    pub fn set_far_detail(&mut self, detail: FarDetail) {
+        if self.far_detail != detail {
             let keys: Vec<_> = self
                 .ready
                 .keys()
@@ -17,7 +17,8 @@ impl Lod {
                 self.mark_stale(key);
             }
         }
-        self.reduced_detail = reduced;
+        self.far_detail = detail;
+        let reduced = detail == FarDetail::Reduced;
         self.shared.approximate.store(reduced, Ordering::Relaxed);
     }
 }

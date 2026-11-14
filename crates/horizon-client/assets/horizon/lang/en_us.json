@@ -378,6 +378,8 @@
   "Native": "Native",
   "Full": "Full",
   "Reduced": "Reduced",
+  "High": "High",
+  "Extreme": "Extreme",
   "Efficient": "Efficient",
   "Precise": "Precise",
   "Auto (VSync)": "Auto (VSync)",
