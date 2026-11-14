@@ -3240,6 +3240,7 @@ impl PackPost {
                 notes.push(format!("the {part} draw with {}", p.name));
             }
         }
+        // In the entity programs' order (`pack_entities::ENTITY`..`SPIDEREYES`).
         let parts = [
             "entities",
             "block entities",
@@ -3247,10 +3248,10 @@ impl PackPost {
             "particles",
             "block breaking cracks",
             "beacon beams",
+            "translucent block entities",
+            "translucent particles",
             "the item glint",
             "the armour glint",
-            "translucent particles",
-            "translucent block entities",
             "lightning bolts",
             "eyes",
         ];
