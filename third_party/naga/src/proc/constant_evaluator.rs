@@ -1156,8 +1156,14 @@ impl<'a> ConstantEvaluator<'a> {
                 // around this by simply emitting it as a run-time expression.
                 // In a GLSL function, a value no literal can hold (an infinity) is GLSL's
                 // arithmetic at run time, as GL drivers compute it; WGSL forbids it.
+                // Likewise a built-in outside its domain (`log(0.0)`): GLSL leaves the result
+                // undefined, not an error, so the driver computes it.
                 let glsl_overflow = matches!(self.behavior, Behavior::Glsl(_))
-                    && matches!(eval_result, Err(ConstantEvaluatorError::Overflow(_)));
+                    && matches!(
+                        eval_result,
+                        Err(ConstantEvaluatorError::Overflow(_)
+                            | ConstantEvaluatorError::InvalidMathArgValue(_))
+                    );
                 if self.behavior.has_runtime_restrictions()
                     && (glsl_overflow
                         || matches!(

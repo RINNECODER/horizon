@@ -580,6 +580,45 @@ fn constants() {
     assert!(constants.next().is_none());
 }
 
+/// GLSL leaves `log` of a value <= 0 undefined, not a compile error: a constant ternary
+/// evaluates only the branch taken, and in a function the value is left to run time.
+#[test]
+fn log_outside_domain_compiles() {
+    use crate::{Expression, Literal};
+
+    let module = Frontend::default()
+        .parse(
+            &Options::from(ShaderStage::Vertex),
+            r#"
+        #  version 450
+        const float top = 2.0;
+        const float a = 1.0 <= top ? 1.0 / 2.0 : log(1.0 - top);
+        const float b = 3.0 <= top ? 0.0 : 3.0;
+        void main() {
+            float c = log(1.0 - top);
+            gl_Position = vec4(a, b, c, 1.0);
+        }
+        "#,
+        )
+        .unwrap();
+
+    let value = |name: &str| {
+        let (_, c) = module
+            .constants
+            .iter()
+            .find(|(_, c)| c.name.as_deref() == Some(name))
+            .unwrap();
+        match module.global_expressions[c.init] {
+            Expression::Literal(Literal::F32(v)) => v,
+            ref e => panic!("{name} = {e:?}"),
+        }
+    };
+    assert_eq!((value("a"), value("b")), (0.5, 3.0));
+    crate::valid::Validator::new(Default::default(), crate::valid::Capabilities::all())
+        .validate(&module)
+        .unwrap();
+}
+
 #[test]
 fn function_overloading() {
     let mut frontend = Frontend::default();
