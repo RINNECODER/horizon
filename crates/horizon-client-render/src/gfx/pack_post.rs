@@ -4827,6 +4827,12 @@ impl PackPost {
             .is_some_and(|e| e.passes[LIGHTNING].is_some())
     }
 
+    /// depthtex0 as this frame left it (GL's rows and window depth), at the world's
+    /// size: frame generation's depth under a pack.
+    pub fn depth(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|t| &t.depth)
+    }
+
     /// Every stage a posable subject can use must have a compiled fallback.
     /// Special models, player and eye/tagged layers retain their CPU paths.
     pub fn skins_entities(&self) -> bool {

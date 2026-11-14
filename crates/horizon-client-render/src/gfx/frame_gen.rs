@@ -11,6 +11,10 @@
 //! frame holds it before the tone curve; the made frame's light goes through the frame's
 //! own passes, the tone curve, the HUD's layer and `Hdr::present`, as the real frame's
 //! does (`Renderer::draw_generated`).
+//!
+//! MetalFX (macOS 26+) can make the frame instead, from FSR's dilated depth and motion
+//! vectors (`metalfx.rs`); FSR's runs where it can't. It alone also runs under a shader
+//! pack: the pack's picture (its hand in it) is the world and its depthtex0 the depth.
 
 #[cfg(test)]
 mod hdr_tests;
@@ -52,6 +56,10 @@ fn debug() -> Option<&'static str> {
 
 pub struct FrameGen {
     pub on: bool,
+    /// MetalFX's frame interpolation instead of FSR 3.1's (`FrameGeneration::MetalFx`),
+    /// where the device has it; FSR's runs where it hasn't.
+    pub metalfx: bool,
+    mfx: Option<super::metalfx::MetalFx>,
     /// The present thread failed to show a frame (or died): until the renderer has
     /// acquired a frame itself, the normal path runs and handles the surface.
     pub paused: bool,
@@ -111,12 +119,46 @@ pub struct Camera {
     pub near: f32,
     pub far: f32,
     pub fov_y: f32,
+    /// `depth` is a shader pack's depthtex0 (GL's rows and window depth).
+    pub gl_depth: bool,
+}
+
+impl Camera {
+    /// The interpolation's inputs for this camera.
+    fn inputs<'a>(
+        &'a self,
+        color: &'a wgpu::TextureView,
+        object_motion: &'a wgpu::TextureView,
+        reproject: Mat4,
+        reset: bool,
+        flow: &'a optical_flow::OpticalFlow,
+        motion_only: bool,
+    ) -> interpolation::Inputs<'a> {
+        interpolation::Inputs {
+            color,
+            depth: &self.depth,
+            render_size: self.render_size,
+            jitter: self.jitter,
+            reproject,
+            object_motion,
+            near: self.near,
+            far: self.far,
+            fov_y: self.fov_y,
+            reset,
+            flow_vectors: flow.vectors(),
+            scene_change: flow.scene_change(),
+            motion_only,
+            gl_depth: self.gl_depth,
+        }
+    }
 }
 
 impl FrameGen {
     pub fn new() -> Self {
         Self {
             on: false,
+            metalfx: false,
+            mfx: None,
             paused: false,
             refused: false,
             gpu: None,
@@ -288,10 +330,12 @@ impl FrameGen {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    // COPY_SRC: the interpolation keeps it as the previous frame.
+                    // COPY_SRC: the interpolation keeps it as the previous frame;
+                    // COPY_DST: a shader pack's picture is copied in.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
@@ -358,26 +402,64 @@ impl FrameGen {
             reproject * camera.view_proj,
         );
         let object_motion = motion.draw(device, encoder, &camera.depth);
+        if self.metalfx {
+            // FSR's dilated camera and object motion vectors, then MetalFX's interpolation.
+            gpu.interpolation.dispatch(
+                device,
+                queue,
+                encoder,
+                &camera.inputs(
+                    &gpu.world,
+                    &object_motion,
+                    reproject,
+                    reset,
+                    &gpu.flow,
+                    true,
+                ),
+            );
+            let (depth, motion) = gpu.interpolation.motion().expect("dispatched");
+            let made = self
+                .mfx
+                .get_or_insert_with(|| super::metalfx::MetalFx::new(device))
+                .interpolate(
+                    encoder,
+                    gpu.world.texture(),
+                    depth,
+                    motion,
+                    camera,
+                    self.interval.as_secs_f32(),
+                    reset,
+                );
+            if let Some(made) = made {
+                gpu.reset = false;
+                match &made {
+                    Some(view) => {
+                        post.finish_with(encoder, generated, &post.bind(device, view), None)
+                    }
+                    None => post.finish_with(encoder, generated, &gpu.world_group, None),
+                }
+                return made.is_some();
+            }
+        }
+        // A shader pack's frames need MetalFX: FSR's needs the world without the hand.
+        if camera.gl_depth {
+            post.finish_with(encoder, generated, &gpu.world_group, None);
+            return false;
+        }
         gpu.flow
             .dispatch(device, queue, encoder, &gpu.world, peak, reset);
         gpu.interpolation.dispatch(
             device,
             queue,
             encoder,
-            &interpolation::Inputs {
-                color: &gpu.world,
-                depth: &camera.depth,
-                render_size: camera.render_size,
-                jitter: camera.jitter,
+            &camera.inputs(
+                &gpu.world,
+                &object_motion,
                 reproject,
-                object_motion: &object_motion,
-                near: camera.near,
-                far: camera.far,
-                fov_y: camera.fov_y,
                 reset,
-                flow_vectors: gpu.flow.vectors(),
-                scene_change: gpu.flow.scene_change(),
-            },
+                &gpu.flow,
+                false,
+            ),
         );
         gpu.reset = false;
         if debug() == Some("motion") {
@@ -397,6 +479,14 @@ impl FrameGen {
         self.presenter
             .as_ref()
             .is_some_and(|p| p.shown.load(Ordering::Relaxed))
+    }
+
+    /// The command buffers MetalFX split this frame into, to submit before its own.
+    pub fn take_pending(&mut self) -> Vec<wgpu::CommandBuffer> {
+        self.mfx
+            .as_mut()
+            .map(super::metalfx::MetalFx::take_pending)
+            .unwrap_or_default()
     }
 
     /// Hand this frame's pair to the present thread, after the frame's submission: the

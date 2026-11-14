@@ -1106,7 +1106,7 @@ impl H {
                 }
             }
             H::FrameGeneration => {
-                g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
+                g.frame_generation = step(FrameGeneration::ALL, g.frame_generation, back)
             }
             // Any choice tries HDR output again on a driver a start failed on.
             H::Hdr => {
@@ -2924,12 +2924,14 @@ mod tests {
             }
         });
         // `labelled` also looks up values that are already words in the language ("An") or
-        // numbers with a unit ("12 chunks", "Auto (8)"); those are not keys, and "FSR 3.1" is
-        // a name.
+        // numbers with a unit ("12 chunks", "Auto (8)"); those are not keys, and "FSR 3.1" and
+        // "MetalFX" are names.
         let missed: Vec<_> = missed
             .into_iter()
             .filter(|m| !m.starts_with(|c: char| c.is_ascii_digit()) && !m.starts_with("Auto ("))
-            .filter(|m| !["An", "Aus", "FSR 3.1", "key.keyboard.unknown"].contains(&m.as_str()))
+            .filter(|m| {
+                !["An", "Aus", "FSR 3.1", "MetalFX", "key.keyboard.unknown"].contains(&m.as_str())
+            })
             .collect();
         assert_eq!(missed, Vec::<String>::new());
     }
