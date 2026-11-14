@@ -22,9 +22,7 @@ use horizon_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 use smallvec::SmallVec;
 
 use super::pack_draw::DrawUniforms;
-use super::pack_entities::{
-    ARMOR_GLINT, BEAM, GLINT, LIGHTNING, PROGRAMS, PackEntities, SPIDEREYES,
-};
+use super::pack_entities::{ARMOR_GLINT, GLINT, LIGHTNING, PROGRAMS, PackEntities, SPIDEREYES};
 use super::pack_images;
 use super::pack_sky::PackSky;
 use super::pack_textures;
@@ -1357,6 +1355,17 @@ pub(super) struct Geometry<'a> {
     pub ids: Option<&'a wgpu::BindGroupLayout>,
     /// Back faces are culled, as for the game's own terrain.
     pub cull: bool,
+}
+
+/// Whether an entity program's draws write depth. Neither the crack, lightning nor eyes do, as
+/// vanilla draws them. Beams do, with the translucent entity parts: a pack's deferred pass reads a
+/// pixel with no depth as sky and paints over it (Photon lost its beam whole, IterationT all but
+/// where clouds crossed it).
+/// shortcut: `beacon.beam.depth` (inner beam in the pre-translucent depth too) is not told apart,
+/// as entity parts drawn before deferred already reach `depthtex1`; and the glow writes depth with
+/// the inner beam. Split them if a pack's translucents show either.
+fn entity_depth(program: usize, name: &str) -> bool {
+    !(name == "gbuffers_damagedblock" || program == LIGHTNING || program == SPIDEREYES)
 }
 
 impl Geometry<'_> {
@@ -3010,10 +3019,8 @@ impl PackPost {
                 pass
             })
         };
-        let mut programs = programs;
-        let beam = programs[BEAM].take();
         let mut kind = 0;
-        let mut entity_passes = programs.map(|p| {
+        let entity_passes = programs.map(|p| {
             let at = kind;
             // The entity program draws the boats, and their water patches (`Draw::water_mask`).
             water_mask_next.set(kind == super::pack_entities::ENTITY);
@@ -3037,8 +3044,7 @@ impl PackPost {
                         cull: false,
                     };
                     paged(build(p, Some(&glint)))
-                } else if p.name == "gbuffers_damagedblock" || at == LIGHTNING || at == SPIDEREYES {
-                    // Neither the crack, lightning nor eyes write depth, as vanilla draws them.
+                } else if !entity_depth(at, &p.name) {
                     paged(build(p, Some(&g.with_depth(false))))
                 } else {
                     paged(build(p, Some(g)))
@@ -3051,12 +3057,6 @@ impl PackPost {
             late[super::pack_entities::PARTICLE] = false;
         }
         water_mask_next.set(false);
-        // Beams write depth only when the pack asks (`beacon.beam.depth`).
-        // shortcut: the glow writes depth with the inner beam then (the format says the inner
-        // beam only); split the glow into a pass of its own if a pack's translucents show it.
-        entity_passes[BEAM] = beam
-            .zip(entity_geometry.as_ref())
-            .and_then(|(p, g)| paged(build(p, Some(&g.with_depth(post.beam_depth)))));
         let shadow_entities = shadow_programs.map(|p| {
             p.zip(entity_geometry.as_ref())
                 .and_then(|(p, g)| paged(build(p, Some(g))))
@@ -6040,6 +6040,17 @@ mod terrain_parts_tests;
 mod tests {
     use super::*;
     use wgpu::TextureFormat as T;
+
+    #[test]
+    fn beams_write_depth_cracks_lightning_and_eyes_do_not() {
+        use super::super::pack_entities::{BEAM, DESTROY, ENTITY};
+        assert!(entity_depth(BEAM, "gbuffers_beaconbeam"));
+        assert!(entity_depth(BEAM, "gbuffers_textured"));
+        assert!(entity_depth(ENTITY, "gbuffers_entities"));
+        assert!(!entity_depth(DESTROY, "gbuffers_damagedblock"));
+        assert!(!entity_depth(LIGHTNING, "gbuffers_entities"));
+        assert!(!entity_depth(SPIDEREYES, "gbuffers_textured"));
+    }
 
     #[test]
     fn shadow_cache_key_tracks_world_and_time_changes() {
