@@ -210,6 +210,7 @@ impl Frontend {
 
         match ctx.parse(self) {
             Ok(mut module) => {
+                functions::callees_first(&mut module);
                 let upgrades: crate::front::atomic_upgrade::Upgrades =
                     core::mem::take(&mut self.atomic_upgrades);
                 if !upgrades.is_empty() {

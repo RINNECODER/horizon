@@ -1757,3 +1757,96 @@ fn builtin_required_variations<'a>(args: impl Iterator<Item = &'a TypeInner>) ->
 
     variations
 }
+
+/// The calls (`Statement::Call`) of `block` and its nested blocks.
+fn for_each_call(block: &mut crate::Block, f: &mut impl FnMut(&mut Handle<crate::Function>)) {
+    for statement in block.iter_mut() {
+        match *statement {
+            crate::Statement::Call {
+                ref mut function, ..
+            } => f(function),
+            crate::Statement::Block(ref mut b) => for_each_call(b, f),
+            crate::Statement::If {
+                ref mut accept,
+                ref mut reject,
+                ..
+            } => {
+                for_each_call(accept, f);
+                for_each_call(reject, f);
+            }
+            crate::Statement::Switch { ref mut cases, .. } => {
+                for case in cases {
+                    for_each_call(&mut case.body, f);
+                }
+            }
+            crate::Statement::Loop {
+                ref mut body,
+                ref mut continuing,
+                ..
+            } => {
+                for_each_call(body, f);
+                for_each_call(continuing, f);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Puts every function after the functions it calls, as Naga requires. A prototype takes its
+/// place in the arena where it is declared, so a function defined later (`float a(); float b()
+/// { .. } float a() { return b(); }`) is called from an earlier one.
+pub(crate) fn callees_first(module: &mut crate::Module) {
+    let mut calls: Vec<Vec<usize>> = Vec::with_capacity(module.functions.len());
+    for (_, function) in module.functions.iter_mut() {
+        let mut called = Vec::new();
+        for_each_call(&mut function.body, &mut |h| called.push(h.index()));
+        calls.push(called);
+    }
+    if calls
+        .iter()
+        .enumerate()
+        .all(|(i, c)| c.iter().all(|&j| j < i))
+    {
+        return;
+    }
+    // Depth-first, callees before callers; GLSL has no recursion (a cycle is left to the
+    // validator, which rejects it).
+    fn visit(i: usize, calls: &[Vec<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
+        if core::mem::replace(&mut seen[i], true) {
+            return;
+        }
+        for &j in &calls[i] {
+            visit(j, calls, seen, order);
+        }
+        order.push(i);
+    }
+    let (mut seen, mut order) = (vec![false; calls.len()], Vec::with_capacity(calls.len()));
+    for i in 0..calls.len() {
+        visit(i, &calls, &mut seen, &mut order);
+    }
+    let mut old: Vec<Option<(crate::Function, Span)>> = module
+        .functions
+        .drain()
+        .map(|(_, f, span)| Some((f, span)))
+        .collect();
+    let mut new_handle = vec![None; old.len()];
+    for &i in &order {
+        let (f, span) = old[i].take().unwrap();
+        new_handle[i] = Some(module.functions.append(f, span));
+    }
+    let remap = |h: &mut Handle<crate::Function>| *h = new_handle[h.index()].unwrap();
+    let mut remap_function = |function: &mut crate::Function| {
+        for_each_call(&mut function.body, &mut |h| remap(h));
+        for (_, e) in function.expressions.iter_mut() {
+            if let crate::Expression::CallResult(ref mut h) = *e {
+                remap(h);
+            }
+        }
+    };
+    for (_, function) in module.functions.iter_mut() {
+        remap_function(function);
+    }
+    for entry in &mut module.entry_points {
+        remap_function(&mut entry.function);
+    }
+}
