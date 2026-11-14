@@ -138,7 +138,9 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
         arena.sources(at.0).is_none(),
         "sidecar refused without losing vertices"
     );
-    assert!(super::super::pack_post::block_ids(&device, &queue, &[0; 128], &[0, 1]).is_none());
+    assert!(
+        super::super::pack_post::block_ids(&device, &queue, &[0; 128], &[0, 1], None).is_none()
+    );
     uploads.finish(&encoder);
     queue.submit([encoder.finish()]);
     assert_eq!(

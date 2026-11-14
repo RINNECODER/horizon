@@ -701,6 +701,9 @@ pub struct PackPost {
     /// nothing draws it (`horizon_shaders::Post::terrain_undrawn`).
     terrain_undrawn: bool,
     water_undrawn: bool,
+    /// `dh_terrain` and `dh_water`: the far tiles, each drawn just before `terrain` and `water`.
+    dh_terrain: Option<Pass>,
+    dh_water: Option<Pass>,
     /// What draws the sky (`gbuffers_skybasic` or its fallback), before terrain, and its vertices.
     sky: Option<Sky>,
     /// What draws entities and block entities, after terrain, and their vertices.
@@ -753,6 +756,8 @@ pub struct PackPost {
     portal_rect: [f32; 4],
     portal_texture: Option<([f32; 4], wgpu::TextureView)>,
     shadow_water: Option<Pass>,
+    /// `dh_shadow`: the far tiles from the light (`TerrainList::ShadowFar`).
+    dh_shadow: Option<Pass>,
     shadow_comp: Vec<Pass>,
     /// Buffers with mipmaps (filterable ones a program asks them for).
     mipped: u32,
@@ -762,9 +767,10 @@ pub struct PackPost {
     down: HashMap<wgpu::TextureFormat, (wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The per-draw uniforms of gbuffers programs.
     draws: DrawUniforms,
-    /// Set 3 of flat terrain: an unknown-source fallback and immutable state/sprite tables.
-    /// Each page's bind group tracks both its vertex buffer and optional source sidecar.
-    block_ids: Option<(wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer)>,
+    /// Set 3 of flat terrain: an unknown-source fallback and immutable state/sprite tables,
+    /// with the far tiles' atlas bindings. Each page's bind group tracks both its vertex buffer
+    /// and optional source sidecar.
+    block_ids: Option<BlockIds>,
     page_groups: HashMap<u32, (wgpu::Buffer, Option<wgpu::Buffer>, wgpu::BindGroup)>,
     gui_size: [u32; 2],
     /// GPU time of each pass, while the renderer asks for it (`pack_timing.rs`).
@@ -995,8 +1001,9 @@ fn source(name: &str, shadow_space: bool, shadow_pass: bool, watershadow: bool) 
         return Source::Dummy;
     }
     match name {
-        "depthtex0" | "gdepthtex" => Source::Depth,
-        "depthtex1" => Source::Depth1,
+        // Distant tiles are in depthtex itself (`pack_uniforms::index_in`'s DH note).
+        "depthtex0" | "gdepthtex" | "dhDepthTex0" | "dhDepthTex" => Source::Depth,
+        "depthtex1" | "dhDepthTex1" => Source::Depth1,
         "depthtex2" => Source::Depth2,
         "noisetex" => Source::Noise,
         "texture" | "gtexture" | "tex" => Source::Atlas,
@@ -1261,11 +1268,20 @@ pub(super) enum TerrainList {
     Translucent,
     ShadowSolid,
     ShadowTranslucent,
+    /// The far tiles' solid and translucent draws, for `dh_terrain` and `dh_water`: while a
+    /// pack has one, `Solid` (and its parts) or `Translucent` leave the tiles out.
+    FarSolid,
+    FarTranslucent,
+    /// The far tiles the shadow camera sees, for `dh_shadow` (none without it).
+    ShadowFar,
 }
 
 impl TerrainList {
     fn translucent(self) -> bool {
-        matches!(self, Self::Translucent | Self::ShadowTranslucent)
+        matches!(
+            self,
+            Self::Translucent | Self::ShadowTranslucent | Self::FarTranslucent
+        )
     }
 }
 
@@ -1296,12 +1312,17 @@ pub(super) fn terrain_tables(table: &[i32], rects: &[u32]) -> Vec<i32> {
         .collect()
 }
 
+/// Set 3 of flat terrain, read by the vertex stage: the unknown-source fallback (a page's
+/// sources replace it), the page's vertices, and the tables (`terrain_tables`). With the atlas,
+/// the far tiles' programs read their sprites' colours and the near columns too
+/// (`PackAtlas::far_inputs`).
 pub(super) fn block_ids(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     table: &[i32],
     rects: &[u32],
-) -> Option<(wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer)> {
+    atlas: Option<&wgpu::TextureView>,
+) -> Option<BlockIds> {
     let buffer = |label, contents: &[u8]| {
         if contents.len() as u64 > device.limits().max_storage_buffer_binding_size {
             return None;
@@ -1330,11 +1351,111 @@ pub(super) fn block_ids(
         },
         count: None,
     };
+    let atlas = atlas.map(|view| {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Far tiles' sprite colours"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let near = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Far tiles' near chunk columns"),
+            size: NEAR_COLUMNS_WORDS as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        (view.clone(), sampler, near)
+    });
+    let mut entries = vec![storage(0), storage(1), storage(2)];
+    if atlas.is_some() {
+        entries.push(storage(5));
+        entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ]);
+    }
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Shader pack terrain"),
-        entries: &[storage(0), storage(1), storage(2)],
+        entries: &entries,
     });
-    Some((layout, ids, rects))
+    Some(BlockIds {
+        layout,
+        ids,
+        rects,
+        atlas,
+    })
+}
+
+pub(super) struct BlockIds {
+    layout: wgpu::BindGroupLayout,
+    ids: wgpu::Buffer,
+    rects: wgpu::Buffer,
+    /// With the atlas, the far tiles' programs' bindings: it, its sampler and the near chunk
+    /// columns (`PackPost::set_near_columns`).
+    atlas: Option<(wgpu::TextureView, wgpu::Sampler, wgpu::Buffer)>,
+}
+
+/// The near chunk columns' bit grid the far tiles' programs read (`pack_atlas::NEAR_COLUMNS`):
+/// 8 header words, then a bit per column of a square up to 257 columns wide.
+pub(super) const NEAR_COLUMNS_WORDS: usize = 8 + (257 * 257usize).div_ceil(32);
+
+/// Lays out `near_columns`' words: the square of columns `radius` (at most 128) around `center`,
+/// its first column and width, the camera's x and z from that column's corner, then a bit per
+/// column (x fastest) that `near` says near terrain draws.
+pub(super) fn near_columns(
+    center: (i32, i32),
+    radius: i32,
+    camera: [f64; 2],
+    near: impl Fn(i32, i32) -> bool,
+    words: &mut Vec<u32>,
+) {
+    let half = radius.clamp(0, 128);
+    let width = 2 * half + 1;
+    let (x0, z0) = (center.0 - half, center.1 - half);
+    let from = |c: i32, x: f64| ((x - f64::from(c) * 16.0) as f32).to_bits();
+    words.clear();
+    words.extend([x0 as u32, z0 as u32, width as u32, 0]);
+    words.extend([from(x0, camera[0]), from(z0, camera[1]), 0, 0]);
+    words.resize(8 + (width * width) as usize / 32 + 1, 0);
+    for z in 0..width {
+        for x in 0..width {
+            if near(x0 + x, z0 + z) {
+                let i = (z * width + x) as usize;
+                words[8 + i / 32] |= 1 << (i % 32);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn near_columns_marks_the_near_chunks_around_the_camera() {
+    let mut words = Vec::new();
+    // Columns 10 and 11 of row 20 are near; the camera stands in column (10, 20).
+    let near = |x, z| z == 20 && (10..=11).contains(&x);
+    near_columns((10, 20), 1, [170.5, 330.25], near, &mut words);
+    assert_eq!(words[..3], [9, 19, 3]);
+    assert_eq!(
+        [words[4], words[5]].map(f32::from_bits),
+        [170.5 - 144.0, 330.25 - 304.0]
+    );
+    // Row 20 is the grid's second, x fastest: bits 4 and 5.
+    assert_eq!(words[8], 0b11_0000);
+    assert!(words.len() <= NEAR_COLUMNS_WORDS);
 }
 
 /// The game's geometry a gbuffers program draws: its vertex buffers and, for flat draws
@@ -2364,7 +2485,7 @@ fn build_compute(
     pack: &Resources<'_>,
 ) -> Option<Pass> {
     let index = |name: &str, ty: &str| {
-        pack_uniforms::index(name).or_else(|| custom_index(custom, name, ty))
+        pack_uniforms::index_in(name, false).or_else(|| custom_index(custom, name, ty))
     };
     let interface = &c.interface;
     let (entries, samplers, slots, reads, shadow_reads, images) = bindings(
@@ -2738,12 +2859,13 @@ impl PackPost {
             .as_ref()
             .filter(|g| g.table.is_some())
             .map(|_| {
-                block_ids(device, queue, world.block_ids, world.sprite_rects).ok_or_else(|| {
-                    Refused {
+                let atlas = world.atlas.as_ref().map(|(view, _)| view);
+                block_ids(device, queue, world.block_ids, world.sprite_rects, atlas).ok_or_else(
+                    || Refused {
                         reason: "terrain source tables could not be allocated".into(),
                         notes: notes.clone(),
-                    }
-                })
+                    },
+                )
             })
             .transpose()?;
         // The next pass built also gets a depth-only pipeline for the boats' water patches.
@@ -2876,7 +2998,7 @@ impl PackPost {
             depth_equal: g.depth_equal,
             atlas: g.atlas.clone(),
             material_maps: g.material_maps,
-            ids: block_ids.as_ref().map(|i| &i.0),
+            ids: block_ids.as_ref().map(|i| &i.layout),
             cull: g.cull,
         });
         let split = post.terrain.is_some() && post.terrain_cutout.is_some();
@@ -2893,6 +3015,10 @@ impl PackPost {
             .water
             .zip(terrain_geometry.as_ref())
             .and_then(|(p, g)| build(p, Some(g)));
+        let [dh_terrain, dh_water] = [post.dh_terrain, post.dh_water].map(|p| {
+            p.zip(terrain_geometry.as_ref())
+                .and_then(|(p, g)| build(p, Some(g)))
+        });
         // The shadow pass draws terrain faces from both sides, as Iris 1.11.7 does (#9033): a
         // cave ceiling faces away from the sun, and is often all that shadows the cave.
         let shadow_geometry = terrain_geometry.as_ref().map(|g| Geometry {
@@ -2928,6 +3054,10 @@ impl PackPost {
                 .and_then(|(p, g)| build(p, Some(g)))
         });
         let water_unpatched = unpatched_name.filter(|_| shadow_water.is_some());
+        let dh_shadow = post
+            .dh_shadow
+            .zip(shadow_geometry.as_ref())
+            .and_then(|(p, g)| build(p, Some(g)));
         let (hides_sky, hides_celestial) = (post.sky.is_some(), post.sky_textured.is_some());
         let sky = (post.sky.is_some() || post.sky_textured.is_some()).then(|| {
             let geometry = PackSky::new(device);
@@ -3219,6 +3349,7 @@ impl PackPost {
             ("terrain", &shadow_terrain),
             ("cutout terrain", &shadow_cutout),
             ("translucent terrain", &shadow_water),
+            ("far terrain", &dh_shadow),
         ] {
             if let Some(p) = pass {
                 notes.push(format!("{part} casts shadows with {}", p.name));
@@ -3319,12 +3450,15 @@ impl PackPost {
                 .chain(&shadow_comp)
                 .chain(&terrain)
                 .chain(&terrain_cutout)
-                .chain(&water))
+                .chain(&water)
+                .chain(&dh_terrain)
+                .chain(&dh_water))
             .chain(
                 shadow_terrain
                     .iter()
                     .chain(&shadow_cutout)
-                    .chain(&shadow_water),
+                    .chain(&shadow_water)
+                    .chain(&dh_shadow),
             )
             .chain(sky.iter().flat_map(|s| s.basic.iter().chain(&s.textured)))
             .chain(entities.iter().flat_map(|e| e.passes.iter().flatten()))
@@ -3568,6 +3702,8 @@ impl PackPost {
             water,
             terrain_undrawn,
             water_undrawn,
+            dh_terrain,
+            dh_water,
             sky,
             entities,
             clouds,
@@ -3593,6 +3729,7 @@ impl PackPost {
             portal_rect: [0.0; 4],
             portal_texture: None,
             shadow_water,
+            dh_shadow,
             shadow_comp,
             mipped,
             mips_valid: 0,
@@ -4200,6 +4337,17 @@ impl PackPost {
         list: TerrainList,
         draw: &mut TerrainDraw<'_>,
     ) {
+        // Iris with DH draws its tiles first, dh_terrain before terrain and dh_water before water.
+        let far = match list {
+            TerrainList::Solid => Some(TerrainList::FarSolid),
+            TerrainList::Translucent => Some(TerrainList::FarTranslucent),
+            // Before shadowtex1's copy: the tiles' shadow is solid.
+            TerrainList::ShadowSolid => Some(TerrainList::ShadowFar),
+            _ => None,
+        };
+        if let Some(far) = far {
+            self.draw_terrain_part(device, queue, encoder, size, far, false, draw);
+        }
         self.draw_terrain_part(device, queue, encoder, size, list, false, draw);
         // Solid terrain's cutout part; in the shadow pass only with `shadow_cutout`.
         if matches!(list, TerrainList::Solid | TerrainList::ShadowSolid) {
@@ -4216,6 +4364,28 @@ impl PackPost {
             TerrainList::ShadowSolid if cutout => &mut self.shadow_cutout,
             TerrainList::ShadowSolid => &mut self.shadow_terrain,
             TerrainList::ShadowTranslucent => &mut self.shadow_water,
+            TerrainList::FarSolid => &mut self.dh_terrain,
+            TerrainList::FarTranslucent => &mut self.dh_water,
+            TerrainList::ShadowFar => &mut self.dh_shadow,
+        }
+    }
+
+    /// Whether `dh_terrain`, `dh_water` and `dh_shadow` draw the far tiles: the renderer then
+    /// lists them apart from the near terrain's (`TerrainList::FarSolid`), and the light's
+    /// (`ShadowFar`).
+    pub(super) fn far_programs(&self) -> [bool; 3] {
+        [
+            self.dh_terrain.is_some(),
+            self.dh_water.is_some(),
+            self.dh_shadow.is_some(),
+        ]
+    }
+
+    /// The chunk columns near terrain draws this frame, which the far tiles' programs leave
+    /// out (`pack_atlas::NEAR_COLUMNS`); `words` as `near_columns` lays them out.
+    pub(super) fn set_near_columns(&self, queue: &wgpu::Queue, words: &[u32]) {
+        if let Some((_, _, near)) = self.block_ids.as_ref().and_then(|b| b.atlas.as_ref()) {
+            queue.write_buffer(near, 0, bytemuck::cast_slice(words));
         }
     }
 
@@ -5084,6 +5254,8 @@ impl PackPost {
             .chain(&mut self.terrain)
             .chain(&mut self.terrain_cutout)
             .chain(&mut self.water)
+            .chain(&mut self.dh_terrain)
+            .chain(&mut self.dh_water)
             .chain(sky)
             .chain(entities)
             .chain(&mut self.clouds)
@@ -5094,6 +5266,7 @@ impl PackPost {
             .chain(&mut self.shadow_terrain)
             .chain(&mut self.shadow_cutout)
             .chain(&mut self.shadow_water)
+            .chain(&mut self.dh_shadow)
             .chain(&mut self.shadow_comp);
         for pass in passes {
             pass.groups.clear();
@@ -5485,6 +5658,7 @@ impl PackPost {
             .iter()
             .chain(self.shadow_cutout.iter())
             .chain(self.shadow_water.iter())
+            .chain(self.dh_shadow.iter())
             .chain(self.shadow_comp.iter())
             .chain(
                 self.entities
@@ -5583,29 +5757,52 @@ impl PackPost {
             self.final_target = None;
             None
         };
-        if let Some((layout, ids, rects)) = &self.block_ids {
+        if let Some(BlockIds {
+            layout,
+            ids,
+            rects,
+            atlas,
+        }) = &self.block_ids
+        {
             // A page that grew has a new buffer.
             self.page_groups
                 .retain(|p, (b, s, _)| pages.iter().any(|(q, c, t)| q == p && c == b && s == t));
             for (page, buffer, sources) in pages {
                 self.page_groups.entry(*page).or_insert_with(|| {
+                    let mut entries = vec![
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: sources.as_ref().unwrap_or(ids).as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: rects.as_entire_binding(),
+                        },
+                    ];
+                    if let Some((view, sampler, near)) = atlas {
+                        entries.extend([
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: near.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(sampler),
+                            },
+                        ]);
+                    }
                     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Shader pack terrain"),
                         layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: sources.as_ref().unwrap_or(ids).as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: rects.as_entire_binding(),
-                            },
-                        ],
+                        entries: &entries,
                     });
                     (buffer.clone(), sources.clone(), group)
                 });

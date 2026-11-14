@@ -51,9 +51,8 @@ pub use options::{
 };
 pub use pack::{Pack, PackError};
 pub use post::{
-    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, FarInputs, GameInputs,
-    Group, ImageSize, Post, PostProgram, STARS_BLEND, ShadowCulling, TRANSLUCENT_BLEND,
-    dimension_folder,
+    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, GameInputs, Group,
+    ImageSize, Post, PostProgram, STARS_BLEND, ShadowCulling, TRANSLUCENT_BLEND, dimension_folder,
     dimension_folder_named, load_post,
 };
 pub use preprocess::{Diagnostic, Origin, Preprocessed, preprocess};

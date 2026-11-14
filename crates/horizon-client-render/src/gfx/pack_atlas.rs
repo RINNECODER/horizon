@@ -110,6 +110,42 @@ fn stitch_mip_level(sides: &[u32], option: u32) -> u32 {
 }
 
 impl PackAtlas {
+    /// `dh_terrain` and `dh_water`'s inputs (flat draws of the far tiles alone, which the
+    /// renderer lists apart for them, `Flat::far_calls`): terrain's, with `dhMaterialId` from
+    /// the layer's table and the block's colour in `gl_Color` (DH tiles carry no texture): the
+    /// tint times the sprite's mean, four taps at its smallest mip level.
+    pub fn far_inputs(&self) -> horizon_shaders::GbuffersInputs {
+        let mut inputs = self.terrain_inputs(true);
+        inputs.declarations.push_str(
+            "layout(set = 3, binding = 3) uniform texture2D hz_dh_atlas;\n\
+             layout(set = 3, binding = 4) uniform sampler hz_dh_sampler;\n\
+             layout(set = 3, binding = 5) readonly buffer HzNearColumns { uint hz_near_columns[]; };\n\
+             int dhMaterialId;\nbool hz_near;\n",
+        );
+        inputs.declarations.push_str(NEAR_COLUMNS_FN);
+        let top = (self.texture.mip_level_count() - 1) as f32;
+        let water = horizon_shaders::DH_BLOCK_MATERIALS
+            .iter()
+            .position(|b| *b == "WATER")
+            .unwrap();
+        inputs.body.push_str(&format!(
+            "    dhMaterialId = int(hz_dh_material);\n    \
+             float hz_lv = min(log2(float(hz_rect.y)), {top:?});\n    \
+             vec2 hz_a = hz_cell * hz_scale;\n    \
+             vec4 hz_mean = 0.25 * (\
+             textureLod(sampler2D(hz_dh_atlas, hz_dh_sampler), hz_a + hz_scale * vec2(0.25, 0.25), hz_lv) + \
+             textureLod(sampler2D(hz_dh_atlas, hz_dh_sampler), hz_a + hz_scale * vec2(0.75, 0.25), hz_lv) + \
+             textureLod(sampler2D(hz_dh_atlas, hz_dh_sampler), hz_a + hz_scale * vec2(0.25, 0.75), hz_lv) + \
+             textureLod(sampler2D(hz_dh_atlas, hz_dh_sampler), hz_a + hz_scale * vec2(0.75, 0.75), hz_lv));\n    \
+             hz_Color = vec4(hz_Color.rgb * hz_mean.rgb, dhMaterialId == {water} ? hz_Color.a * hz_mean.a : hz_Color.a);\n"
+        ));
+        inputs.body.push_str(NEAR_COLUMNS);
+        inputs
+            .after
+            .push_str("    if (hz_near) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n");
+        inputs
+    }
+
     /// Copies `layers` layers of `arrays` (`split` per array, `sprite` pixels wide, `levels`
     /// mip levels); `None` when the grid is larger than the device allows.
     pub fn new(
@@ -387,21 +423,27 @@ impl PackAtlas {
     }
 
     /// The table flat terrain reads (`hz_sprite_rects`): per layer, its sprite's top left corner
-    /// (x | y << 16) and side, in atlas pixels.
-    pub fn rects_table(&self) -> Vec<u32> {
-        if let Some(stitched) = &self.stitched {
-            return stitched
+    /// (x | y << 16) and side, in atlas pixels, the side with the layer's `dh_materials` entry
+    /// (`dhMaterialId`) in bits 24 and up.
+    pub fn rects_table(&self, dh_materials: &[u8]) -> Vec<u32> {
+        let mut table: Vec<u32> = if let Some(stitched) = &self.stitched {
+            stitched
                 .rects
                 .iter()
                 .flat_map(|&[x, y, side]| [x | (y << 16), side])
-                .collect();
+                .collect()
+        } else {
+            (0..self.columns * self.texture.height() / self.sprite)
+                .flat_map(|layer| {
+                    let (x, y) = (layer % self.columns, layer / self.columns);
+                    [(x * self.sprite) | ((y * self.sprite) << 16), self.sprite]
+                })
+                .collect()
+        };
+        for (side, &m) in table.iter_mut().skip(1).step_by(2).zip(dh_materials) {
+            *side |= u32::from(m) << 24;
         }
-        (0..self.columns * self.texture.height() / self.sprite)
-            .flat_map(|layer| {
-                let (x, y) = (layer % self.columns, layer / self.columns);
-                [(x * self.sprite) | ((y * self.sprite) << 16), self.sprite]
-            })
-            .collect()
+        table
     }
 
     /// The atlas's size in pixels (`atlasSize`).
@@ -664,6 +706,35 @@ const PULL_FLAT: &str = "    uint hz_qv = uint(gl_VertexIndex);\n    \
     hz_v_color = vec4(float(hz_vr.z & 255u), float((hz_vr.z >> 8u) & 255u), float((hz_vr.z >> 16u) & 255u),\n        \
         float(hz_vr.z >> 24u)) * (1.0 / 255.0);\n";
 
+/// Whether a far tile's quad lies over chunk columns near terrain draws (`hz_near`), read from
+/// `pack_post::near_columns`' grid: all those of the blocks it belongs to (a side face's are
+/// behind it), or for a side face all those it faces. Its programs then drop it. Far terrain
+/// from a mod (DH) comes whole, so its tiles stood in the near terrain; Horizon's own is cut
+/// around the near chunks, so its tiles' sides there face down to their bottom: both showed as
+/// flat walls under clear water at the coasts. A quad over the edge stays.
+const NEAR_COLUMNS_FN: &str = "bool hz_near_box(vec2 hz_lo, vec2 hz_hi) {\n    \
+    int hz_nw = int(hz_near_columns[2]);\n    \
+    vec2 hz_ncam = uintBitsToFloat(uvec2(hz_near_columns[4], hz_near_columns[5]));\n    \
+    ivec2 hz_c0 = ivec2(floor((hz_lo + hz_ncam) / 16.0));\n    \
+    ivec2 hz_c1 = ivec2(floor((hz_hi + hz_ncam) / 16.0));\n    \
+    if (any(lessThan(hz_c0, ivec2(0))) || any(greaterThanEqual(hz_c1, ivec2(hz_nw)))\n        \
+        || any(greaterThanEqual(hz_c1 - hz_c0, ivec2(8)))) return false;\n    \
+    for (int hz_z = hz_c0.y; hz_z <= hz_c1.y; hz_z++) {\n        \
+        for (int hz_x = hz_c0.x; hz_x <= hz_c1.x; hz_x++) {\n            \
+            uint hz_i = uint(hz_z * hz_nw + hz_x);\n            \
+            if ((hz_near_columns[8u + (hz_i >> 5u)] & (1u << (hz_i & 31u))) == 0u) return false;\n        \
+        }\n    \
+    }\n    \
+    return true;\n\
+}\n";
+/// `hz_near` of a flat-drawn vertex's quad (`NEAR_COLUMNS_FN`), its box 0.01 inside its faces.
+const NEAR_COLUMNS: &str = "    vec2 hz_nin = 0.01 * (1.0 - abs(hz_Normal.xz));\n    \
+    vec2 hz_nlo = min(hz_p0.xz, hz_p2.xz) + hz_origin.xz + hz_nin;\n    \
+    vec2 hz_nhi = max(hz_p0.xz, hz_p2.xz) + hz_origin.xz - hz_nin;\n    \
+    vec2 hz_nn = 0.01 * hz_Normal.xz;\n    \
+    hz_near = hz_near_box(hz_nlo - hz_nn, hz_nhi - hz_nn)\n        \
+        || (abs(hz_Normal.y) < 0.5 && hz_near_box(hz_nlo + hz_nn, hz_nhi + hz_nn));\n";
+
 /// GLSL: the face normal and tangent of a flat-drawn vertex, from its quad's first three corners
 /// (`PULL_FLAT`'s corners: four consecutive vertex indices, in either layout).
 const FACE: &str = "    vec3 hz_p0 = uintBitsToFloat(hz_cp0);\n    \
@@ -782,6 +853,8 @@ impl PackAtlas {
             (
                 "uvec2 hz_rect = uvec2(0u, 1u);\n    \
                  if (2u * hz_layer + 1u < uint(hz_tables[0])) hz_rect = uvec2(hz_tables[2u + 2u * hz_layer], hz_tables[3u + 2u * hz_layer]);\n    \
+                 uint hz_dh_material = hz_rect.y >> 24u;\n    \
+                 hz_rect.y &= 0xffffffu;\n    \
                  hz_cell = vec2(float(hz_rect.x & 65535u), float(hz_rect.x >> 16u)) / float(hz_rect.y);\n    "
                     .to_owned(),
                 "float(hz_rect.y)",
@@ -1057,8 +1130,8 @@ mod tests {
             PackAtlas::stitched(&device, &mut encoder, &[array], 3, 4, &[2, 4, 1], 0, 0).unwrap();
         assert_eq!(atlas.size(), [16, 8]);
         assert_eq!(
-            atlas.rects_table(),
-            [9 | 1 << 16, 2, 1 | 1 << 16, 4, 9 | 5 << 16, 1]
+            atlas.rects_table(&[0, 12]),
+            [9 | 1 << 16, 2, 1 | 1 << 16, 4 | 12 << 24, 9 | 5 << 16, 1]
         );
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -1174,7 +1247,7 @@ mod tests {
                 .material_for(&device, &mut encoder, &arrays, 3)
                 .unwrap();
             assert_eq!(material.size(), [16, 8]);
-            assert_eq!(material.rects_table(), colour.rects_table());
+            assert_eq!(material.rects_table(&[]), colour.rects_table(&[]));
             assert_eq!(material.texture.mip_level_count(), 1);
             queue.submit([encoder.finish()]);
             encoder = device.create_command_encoder(&Default::default());
