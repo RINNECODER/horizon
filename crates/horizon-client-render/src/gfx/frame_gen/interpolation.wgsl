@@ -370,6 +370,12 @@ fn prepare_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
     if object.z > 0.5 {
         mv = object.xy;
     }
+    // A shader pack draws the hand into its picture at window depths within MC_HAND_DEPTH
+    // (0.125) of the middle (pack_hand.rs), nearer than any world surface: it moves with the
+    // view, not with the camera's motion.
+    if params.gl_depth != 0u && nearest > 0.4375 {
+        mv = vec2(0.0);
+    }
     textureStore(dilated_depth_out, p, vec4(nearest, 0.0, 0.0, 0.0));
     textureStore(dilated_mv_out, p, vec4(mv, 0.0, 0.0));
     // ReconstructPrevDepth
