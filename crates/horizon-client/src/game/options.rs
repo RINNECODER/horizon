@@ -590,9 +590,7 @@ impl Game<'_> {
             }
             let scale = super::frame_autotune::world_scale(&s.horizon, &self.dynamic_resolution);
             super::frame_autotune::apply_world_post(r, &s.horizon, scale);
-            r.set_frame_generation(
-                s.horizon.frame_generation != horizon_client::graphics::FrameGeneration::Off,
-            );
+            r.set_frame_generation(s.horizon.frame_generation);
             r.set_hdr_lighting(s.horizon.hdr_lighting);
             // Where it is offered (`Renderer::gpu_culling_offer`); unchanged, it does nothing.
             // Auto has it on while its measurements say so (`GpuCullingAuto`), and starts over

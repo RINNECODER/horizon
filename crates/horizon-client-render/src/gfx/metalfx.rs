@@ -1,7 +1,8 @@
 //! MetalFX upscaling (macOS, Metal backend): the Upscaler setting's Spatial and Temporal.
 //! Spatial rebuilds a picture smaller than the window (the world below 100% resolution
 //! scale, a shader pack's `final`); Temporal takes TAA's place on the jittered world, with
-//! the camera's motion vectors (`world_post.wgsl`'s `fs_motion`).
+//! the camera's motion vectors (`world_post.wgsl`'s `fs_motion`). It also makes Frame
+//! Generation's frames (`frame_gen.rs`) with MetalFX's frame interpolation.
 //!
 //! The Metal calls live in `horizon_hdr::metalfx` (this crate forbids unsafe code). It may
 //! submit the frame recorded so far and hand back a fresh encoder for the rest of it.
@@ -82,6 +83,44 @@ impl MetalFx {
             reset: frame.reset,
         };
         self.imp.temporal(encoder, &frame, motion)
+    }
+
+    /// MetalFX frame interpolation (Frame Generation's MetalFX): the frame halfway between
+    /// the last real `color` (the world without the hand and HUD) and this one, from FSR's
+    /// dilated `depth` and `motion` at the render size. `Some(None)`: no previous frame
+    /// yet; `None`: MetalFX can't run here (logged once), FSR's runs instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn interpolate(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::Texture,
+        depth: &wgpu::TextureView,
+        motion: &wgpu::TextureView,
+        camera: &super::frame_gen::Camera,
+        delta_time: f32,
+        reset: bool,
+    ) -> Option<Option<wgpu::TextureView>> {
+        #[cfg(target_os = "macos")]
+        {
+            let frame = horizon_hdr::metalfx::InterpolationFrame {
+                color,
+                depth,
+                motion,
+                render_size: camera.render_size,
+                jitter_pixels: camera.jitter,
+                near: camera.near,
+                far: camera.far,
+                fov_y_degrees: camera.fov_y.to_degrees(),
+                delta_time,
+                reset,
+            };
+            self.imp.interpolate(encoder, &frame)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (encoder, color, depth, motion, camera, delta_time, reset);
+            None
+        }
     }
 
     pub fn device(&self) -> &wgpu::Device {

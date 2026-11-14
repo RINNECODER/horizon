@@ -6,6 +6,10 @@
 //!
 //! The renderer draws into frames of its own while this is on; the present thread
 //! copies each to the swapchain, which it alone acquires and presents.
+//!
+//! MetalFX (macOS 26+) can make the frame instead, from FSR's dilated depth and motion
+//! vectors (`metalfx.rs`); FSR's runs where it can't. It alone also runs under a shader
+//! pack: the pack's picture (its hand in it) is the world and its depthtex0 the depth.
 
 mod interpolation;
 mod motion;
@@ -45,6 +49,10 @@ fn debug() -> Option<&'static str> {
 
 pub struct FrameGen {
     pub on: bool,
+    /// MetalFX's frame interpolation instead of FSR 3.1's (`FrameGeneration::MetalFx`),
+    /// where the device has it; FSR's runs where it hasn't.
+    pub metalfx: bool,
+    mfx: Option<super::metalfx::MetalFx>,
     /// The present thread failed to show a frame (or died): until the renderer has
     /// acquired a frame itself, the normal path runs and handles the surface.
     pub paused: bool,
@@ -98,12 +106,46 @@ pub struct Camera {
     pub near: f32,
     pub far: f32,
     pub fov_y: f32,
+    /// `depth` is a shader pack's depthtex0 (GL's rows and window depth).
+    pub gl_depth: bool,
+}
+
+impl Camera {
+    /// The interpolation's inputs for this camera.
+    fn inputs<'a>(
+        &'a self,
+        color: &'a wgpu::TextureView,
+        object_motion: &'a wgpu::TextureView,
+        reproject: Mat4,
+        reset: bool,
+        flow: &'a optical_flow::OpticalFlow,
+        motion_only: bool,
+    ) -> interpolation::Inputs<'a> {
+        interpolation::Inputs {
+            color,
+            depth: &self.depth,
+            render_size: self.render_size,
+            jitter: self.jitter,
+            reproject,
+            object_motion,
+            near: self.near,
+            far: self.far,
+            fov_y: self.fov_y,
+            reset,
+            flow_vectors: flow.vectors(),
+            scene_change: flow.scene_change(),
+            motion_only,
+            gl_depth: self.gl_depth,
+        }
+    }
 }
 
 impl FrameGen {
     pub fn new() -> Self {
         Self {
             on: false,
+            metalfx: false,
+            mfx: None,
             paused: false,
             gpu: None,
             presenter: None,
@@ -262,10 +304,12 @@ impl FrameGen {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: config.format.remove_srgb_suffix(),
-                    // COPY_SRC: the interpolation keeps it as the previous frame.
+                    // COPY_SRC: the interpolation keeps it as the previous frame;
+                    // COPY_DST: a shader pack's picture is copied in.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
@@ -283,9 +327,11 @@ impl FrameGen {
         self.gpu.as_ref().expect("made above").world.clone()
     }
 
-    /// Copy the world (`world`) onto `screen` for the real frame, and draw the made
-    /// frame's world onto `generated`. Returns false when there is no made frame (the
-    /// first after a reset): `generated` then holds this frame's world too.
+    /// Copy the world (`world`) onto `screen` for the real frame (`None`: a shader pack's
+    /// picture is there already and was copied into `world`), and draw the made frame's
+    /// world onto `generated`. Returns false when there is no made frame (the first after
+    /// a reset): `generated` then holds this frame's world too. A shader pack's frames
+    /// need MetalFX: without it (`metalfx` off or refused) there is no made frame.
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &mut self,
@@ -293,12 +339,14 @@ impl FrameGen {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         post: &super::world_post::Post,
-        screen: &wgpu::TextureView,
+        screen: Option<&wgpu::TextureView>,
         generated: &wgpu::TextureView,
         camera: &Camera,
     ) -> bool {
         let gpu = self.gpu.as_mut().expect("world() ran this frame");
-        post.finish_with(encoder, screen, &gpu.world_group, None);
+        if let Some(screen) = screen {
+            post.finish_with(encoder, screen, &gpu.world_group, None);
+        }
         let reset = gpu.reset || camera.reproject.is_none();
         let reproject = camera.reproject.unwrap_or(Mat4::IDENTITY);
         let object_motion = self
@@ -315,25 +363,62 @@ impl FrameGen {
                 camera.view_proj,
                 reproject * camera.view_proj,
             );
+        if self.metalfx {
+            // FSR's dilated camera and entity motion vectors, then MetalFX's interpolation.
+            gpu.interpolation.dispatch(
+                device,
+                queue,
+                encoder,
+                &camera.inputs(
+                    &gpu.world,
+                    &object_motion,
+                    reproject,
+                    reset,
+                    &gpu.flow,
+                    true,
+                ),
+            );
+            let (depth, motion) = gpu.interpolation.motion().expect("dispatched");
+            let made = self
+                .mfx
+                .get_or_insert_with(|| super::metalfx::MetalFx::new(device))
+                .interpolate(
+                    encoder,
+                    gpu.world.texture(),
+                    depth,
+                    motion,
+                    camera,
+                    self.interval.as_secs_f32(),
+                    reset,
+                );
+            if let Some(made) = made {
+                gpu.reset = false;
+                match &made {
+                    Some(view) => {
+                        post.finish_with(encoder, generated, &post.bind(device, view), None)
+                    }
+                    None => post.finish_with(encoder, generated, &gpu.world_group, None),
+                }
+                return made.is_some();
+            }
+        }
+        if screen.is_none() {
+            post.finish_with(encoder, generated, &gpu.world_group, None);
+            return false;
+        }
         gpu.flow.dispatch(device, queue, encoder, &gpu.world, reset);
         gpu.interpolation.dispatch(
             device,
             queue,
             encoder,
-            &interpolation::Inputs {
-                color: &gpu.world,
-                depth: &camera.depth,
-                render_size: camera.render_size,
-                jitter: camera.jitter,
+            &camera.inputs(
+                &gpu.world,
+                &object_motion,
                 reproject,
-                object_motion: &object_motion,
-                near: camera.near,
-                far: camera.far,
-                fov_y: camera.fov_y,
                 reset,
-                flow_vectors: gpu.flow.vectors(),
-                scene_change: gpu.flow.scene_change(),
-            },
+                &gpu.flow,
+                false,
+            ),
         );
         gpu.reset = false;
         if debug() == Some("motion") {
@@ -346,6 +431,14 @@ impl FrameGen {
             post.finish_with(encoder, generated, &gpu.output_group, None);
         }
         !reset
+    }
+
+    /// The command buffers MetalFX split this frame into, to submit before its own.
+    pub fn take_pending(&mut self) -> Vec<wgpu::CommandBuffer> {
+        self.mfx
+            .as_mut()
+            .map(super::metalfx::MetalFx::take_pending)
+            .unwrap_or_default()
     }
 
     /// Hand this frame's pair to the present thread, after the frame's submission: the

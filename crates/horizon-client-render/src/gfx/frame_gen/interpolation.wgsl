@@ -47,7 +47,9 @@ struct Params {
     tan_half_fov: f32,
     // A mip level's size, for the pyramid passes.
     level_size: vec2<i32>,
-    _pad: vec2<u32>,
+    // 1: `input_depth` is a shader pack's depthtex0 (GL's rows and window depth).
+    gl_depth: u32,
+    _pad: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -334,6 +336,9 @@ fn camera_motion_vector(p: vec2<i32>, depth: f32) -> vec2<f32> {
 fn load_input_depth(p: vec2<i32>) -> f32 {
     if !is_on_screen(p, params.render_size) {
         return 0.0;
+    }
+    if params.gl_depth != 0u {
+        return 1.0 - textureLoad(input_depth, vec2(p.x, params.render_size.y - 1 - p.y), 0).r;
     }
     return textureLoad(input_depth, p, 0).r;
 }

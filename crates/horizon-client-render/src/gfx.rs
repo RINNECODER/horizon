@@ -263,6 +263,7 @@ mod screenshot_save;
 mod stars;
 mod surface_setup;
 use surface_setup::{AdapterChoice, AdapterFailure, open_adapter, pick_adapter, set_up_surface};
+mod metalfx;
 mod off_page;
 pub mod submit;
 mod sunrise_fan;
@@ -272,7 +273,6 @@ pub(crate) mod upload;
 mod view;
 mod visbuffer;
 mod wgsl_prefix;
-mod metalfx;
 mod world_post;
 pub mod world_primitives;
 mod world_warp;
@@ -6925,12 +6925,15 @@ impl Renderer {
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
-    /// Frame generation on or off (FSR 3.1's frame interpolation).
-    pub fn set_frame_generation(&mut self, on: bool) {
-        if !on {
+    /// The Frame Generation setting: off, FSR 3.1's frame interpolation or MetalFX's.
+    pub fn set_frame_generation(&mut self, mode: crate::graphics::FrameGeneration) {
+        let on = mode != crate::graphics::FrameGeneration::Off;
+        let metalfx = mode == crate::graphics::FrameGeneration::MetalFx;
+        if !on || metalfx != self.frame_gen.metalfx {
             self.frame_gen.stop();
         }
         self.frame_gen.on = on;
+        self.frame_gen.metalfx = metalfx;
     }
     /// `upscale`: output pixels per rendered pixel, for TAA to rebuild (1: native).
     /// `sharpness`: how much TAA's upscaled picture is sharpened, 0..=1.
@@ -7947,14 +7950,15 @@ impl Renderer {
         laps.lap("r_prepare");
         // Frame generation: its present thread acquires and presents, this frame draws
         // into frames of its own. Not over menus that blur the frame, a shader pack's
-        // own post passes, HDR (or the 16-bit frame it was started with) or the title screen.
+        // own post passes (but with MetalFX's), HDR (or the 16-bit frame it was started
+        // with) or the title screen.
         let fg = self.frame_gen.on
             && !self.frame_gen.paused
             && self.hdr.is_none()
             && self.output.frame.format == self.config.format.remove_srgb_suffix()
             && !frame.title
             && frame.menu_blur.is_none()
-            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
+            && (self.frame_gen.metalfx || self.pack_post.as_ref().is_none_or(|p| p.1.is_none()))
             && self.native.as_ref().is_none_or(|n| n.post.is_none())
             && (self.surface.is_none()
                 || self.config.usage.contains(wgpu::TextureUsages::COPY_DST));
@@ -11553,6 +11557,17 @@ impl Renderer {
                 self.draw_hand(&mut pass, hand_quads, world_quads + additive_quads);
             }
         }
+        // Frame generation's made frame: the hand halfway (unless a pack drew it) and the HUD.
+        let made_overlay = Overlay {
+            hand_quads: hand_quads * u32::from(!pack_draws_hand),
+            first_hand_vertex: made_hand_vertex,
+            crosshair,
+            first_crosshair: debug_depth + debug_top,
+            world_depth: false,
+            real: false,
+            hand_drawn: !pack_draws_hand,
+            hand_view_proj,
+        };
         if let Some((color, depth)) = &scaled
             && pack_post
             && let Some((dimension, Some(mut post))) = self.pack_post.take()
@@ -11686,6 +11701,55 @@ impl Renderer {
                 pages,
                 &mut terrain,
             );
+            // Frame generation over the pack's picture (MetalFX only: FSR's needs the world
+            // without the hand): the picture is copied in as the world, depthtex0 is its depth.
+            if let Some((_, generated)) = &fg_frames
+                && let Some(pack_depth) = post.depth()
+            {
+                let world = self
+                    .frame_gen
+                    .world(&self.device, &self.world_post, &self.config);
+                encoder.copy_texture_to_texture(
+                    target_texture.as_image_copy(),
+                    world.texture().as_image_copy(),
+                    target_texture.size(),
+                );
+                let render = pack_depth.texture().size();
+                let camera = frame_gen::Camera {
+                    jittered,
+                    view_proj,
+                    depth: pack_depth.clone(),
+                    render_size: [render.width, render.height],
+                    jitter: [0.0; 2],
+                    reproject: self.frame_gen.camera_motion(view_proj, frame.camera),
+                    near: NEAR_PLANE,
+                    far: frame.depth_far,
+                    fov_y: frame.fov_degrees.to_radians(),
+                    gl_depth: true,
+                };
+                let generated_view = generated.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(self.config.format.remove_srgb_suffix()),
+                    ..Default::default()
+                });
+                fg_made = self.frame_gen.generate(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &self.world_post,
+                    None,
+                    &generated_view,
+                    &camera,
+                );
+                if fg_made {
+                    self.draw_overlay(
+                        &mut encoder,
+                        frame,
+                        &generated_view,
+                        generated,
+                        &made_overlay,
+                    );
+                }
+            }
             // Keep the capacity, not the buffers: a page the arena frees must not stay alive
             // here until the next shader-pack frame (or forever once the pack is off).
             self.pack_pages.clear();
@@ -11722,6 +11786,7 @@ impl Renderer {
                 near: NEAR_PLANE,
                 far: frame.depth_far,
                 fov_y: frame.fov_degrees.to_radians(),
+                gl_depth: false,
             };
             let generated_view = generated.create_view(&wgpu::TextureViewDescriptor {
                 format: Some(self.config.format.remove_srgb_suffix()),
@@ -11732,22 +11797,18 @@ impl Renderer {
                 &self.queue,
                 &mut encoder,
                 &self.world_post,
-                &view_target,
+                Some(&view_target),
                 &generated_view,
                 &camera,
             );
             if fg_made {
-                let overlay = Overlay {
-                    hand_quads: hand_quads * u32::from(!pack_draws_hand),
-                    first_hand_vertex: made_hand_vertex,
-                    crosshair,
-                    first_crosshair: debug_depth + debug_top,
-                    world_depth: false,
-                    real: false,
-                    hand_drawn: !pack_draws_hand,
-                    hand_view_proj,
-                };
-                self.draw_overlay(&mut encoder, frame, &generated_view, generated, &overlay);
+                self.draw_overlay(
+                    &mut encoder,
+                    frame,
+                    &generated_view,
+                    generated,
+                    &made_overlay,
+                );
             }
         } else if scaled.is_some() {
             self.world_post.finish(
@@ -11913,6 +11974,8 @@ impl Renderer {
         {
             before.append(&mut metalfx.take_pending());
         }
+        // Frame generation's split comes after the upscalers'.
+        before.append(&mut self.frame_gen.take_pending());
         let (before, encoder, surface_frame, after) = if readback.is_none()
             && frame.pack.frame_timing.is_none()
             && fg_frames.is_none()

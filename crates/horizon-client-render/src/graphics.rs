@@ -413,24 +413,43 @@ pub enum FrameGeneration {
     Off,
     /// AMD FidelityFX Super Resolution 3.1's frame interpolation, ported to WGSL.
     Fsr31,
+    /// Apple's MetalFX frame interpolation (macOS 26+); FSR 3.1's where it can't run. The
+    /// only one that runs under a shader pack.
+    MetalFx,
 }
 impl FrameGeneration {
-    pub const ALL: [FrameGeneration; 2] = [FrameGeneration::Off, FrameGeneration::Fsr31];
+    /// The choices this platform offers: MetalFX only on macOS.
+    pub const ALL: &'static [FrameGeneration] = if cfg!(target_os = "macos") {
+        &[
+            FrameGeneration::Off,
+            FrameGeneration::Fsr31,
+            FrameGeneration::MetalFx,
+        ]
+    } else {
+        &[FrameGeneration::Off, FrameGeneration::Fsr31]
+    };
     pub fn name(self) -> &'static str {
         match self {
             FrameGeneration::Off => "off",
             FrameGeneration::Fsr31 => "fsr3.1",
+            FrameGeneration::MetalFx => "metalfx",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             FrameGeneration::Off => "Off",
             FrameGeneration::Fsr31 => "FSR 3.1",
+            FrameGeneration::MetalFx => "MetalFX",
         }
     }
+    /// A file from macOS read elsewhere gets FSR 3.1's.
     fn parse(s: &str) -> Self {
+        if s == FrameGeneration::MetalFx.name() && !Self::ALL.contains(&FrameGeneration::MetalFx) {
+            return FrameGeneration::Fsr31;
+        }
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|f| f.name() == s)
             .unwrap_or_default()
     }
@@ -1810,6 +1829,19 @@ mod tests {
         assert_eq!(peak_step_of(3250.0), 38.5);
         assert_eq!(peak_step_of(100.0), 0.0);
         assert_eq!(peak_step_of(20_000.0), PEAK_STEPS as f32);
+    }
+
+    #[test]
+    fn metalfx_frame_generation_falls_back_to_fsr_off_macos() {
+        let read = |text: &str| Graphics::parse(text).frame_generation;
+        let expected = if cfg!(target_os = "macos") {
+            FrameGeneration::MetalFx
+        } else {
+            FrameGeneration::Fsr31
+        };
+        assert_eq!(read("frameGeneration:metalfx\n"), expected);
+        assert_eq!(read("frameGeneration:fsr3.1\n"), FrameGeneration::Fsr31);
+        assert_eq!(read("frameGeneration:nonsense\n"), FrameGeneration::Off);
     }
 
     #[test]

@@ -68,6 +68,11 @@ pub struct Inputs<'a> {
     /// (`OpticalFlow::vectors`, `scene_change`).
     pub flow_vectors: &'a wgpu::TextureView,
     pub scene_change: &'a wgpu::Buffer,
+    /// Only the dilated depth and motion vectors (`motion`), for MetalFX's interpolation.
+    pub motion_only: bool,
+    /// `depth` is a shader pack's depthtex0: GL's rows (row 0 at the bottom) and window
+    /// depth (`1 - d` of Horizon's).
+    pub gl_depth: bool,
 }
 
 /// `interpolation.wgsl`'s `Params`.
@@ -84,7 +89,8 @@ struct Params {
     reset: u32,
     tan_half_fov: f32,
     level_size: [i32; 2],
-    _pad: [u32; 2],
+    gl_depth: u32,
+    _pad: u32,
 }
 
 /// The game vector field pyramid's levels (`LoadInpaintedGameFieldMv`) and the
@@ -427,7 +433,8 @@ impl Interpolation {
             reset: u32::from(reset),
             tan_half_fov: (0.5 * inputs.fov_y).tan() * render[0] as f32 / render[1].max(1) as f32,
             level_size: [0; 2],
-            _pad: [0; 2],
+            gl_depth: u32::from(inputs.gl_depth),
+            _pad: 0,
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&base));
         let level_params = |buffers: &[wgpu::Buffer], sizes: &[[u32; 2]]| {
@@ -473,6 +480,16 @@ impl Interpolation {
                 (9, whole(&r.rec_prev_depth)),
             ],
         );
+        if inputs.motion_only {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Frame generation motion vectors"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.prepare);
+            pass.set_bind_group(0, &prepare, &[]);
+            pass.dispatch_workgroups(r.size[0].div_ceil(8), r.size[1].div_ceil(8), 1);
+            return;
+        }
         let setup = groups(
             &p.setup,
             &[
@@ -639,6 +656,15 @@ impl Interpolation {
     pub fn output(&self) -> &wgpu::TextureView {
         &self.output
     }
+
+    /// The last `dispatch`'s dilated depth (`R32Float`, Horizon's reversed depth and rows)
+    /// and motion vectors (`Rg32Float`, UV, to where each pixel was last frame), at the
+    /// render size.
+    pub fn motion(&self) -> Option<(&wgpu::TextureView, &wgpu::TextureView)> {
+        self.render
+            .as_ref()
+            .map(|r| (&r.dilated_depth, &r.dilated_mv))
+    }
 }
 
 #[cfg(test)]
@@ -795,6 +821,8 @@ mod tests {
                     reset: i == 0,
                     flow_vectors: flow.vectors(),
                     scene_change: flow.scene_change(),
+                    motion_only: false,
+                    gl_depth: false,
                 },
             );
             queue.submit([encoder.finish()]);
@@ -862,6 +890,115 @@ mod tests {
             made * 4.0 < previous.min(current),
             "{made} against {previous} and {current}"
         );
+    }
+
+    /// MetalFX's motion vectors under a shader pack: its depthtex0 (GL's rows, `1 - d`)
+    /// gives the same vectors as Horizon's depth.
+    #[test]
+    fn reads_a_shader_packs_depth_as_horizons() {
+        let Some((device, queue)) = of::device() else {
+            return;
+        };
+        let size = [64u32, 32];
+        let d = |x: u32, y: u32| 0.002 + 0.01 * y as f32 + 0.0003 * x as f32;
+        let texture = |texels: Vec<f32>, format, texel: u32| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                t.as_image_copy(),
+                bytemuck::cast_slice(&texels),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size[0] * texel),
+                    rows_per_image: None,
+                },
+                t.size(),
+            );
+            t.create_view(&Default::default())
+        };
+        let horizon = texture(
+            (0..size[1])
+                .flat_map(|y| (0..size[0]).map(move |x| d(x, y)))
+                .collect(),
+            wgpu::TextureFormat::R32Float,
+            4,
+        );
+        let gl = texture(
+            (0..size[1])
+                .rev()
+                .flat_map(|y| (0..size[0]).map(move |x| 1.0 - d(x, y)))
+                .collect(),
+            wgpu::TextureFormat::R32Float,
+            4,
+        );
+        let still = texture(
+            vec![0.0; (size[0] * size[1] * 2) as usize],
+            super::super::motion::FORMAT,
+            8,
+        );
+        let flow = OpticalFlow::new(&device, size);
+        // The previous frame's x moves with the depth: every pixel its own vector.
+        let reproject = Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::new(3.0, 1.0, 1.0, 0.0),
+            glam::Vec4::W,
+        );
+        let motion = |depth: &wgpu::TextureView, gl_depth| {
+            let mut interpolation = Interpolation::new(&device, size);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            interpolation.dispatch(
+                &device,
+                &queue,
+                &mut encoder,
+                &Inputs {
+                    color: depth,
+                    depth,
+                    render_size: size,
+                    jitter: [0.0; 2],
+                    reproject,
+                    object_motion: &still,
+                    near: 0.05,
+                    far: 512.0,
+                    fov_y: 1.2,
+                    reset: true,
+                    flow_vectors: flow.vectors(),
+                    scene_change: flow.scene_change(),
+                    motion_only: true,
+                    gl_depth,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            let mv = interpolation
+                .motion()
+                .expect("dispatched")
+                .1
+                .texture()
+                .clone();
+            let bytes = of::read(&device, &queue, &mv, 8);
+            bytes
+                .chunks(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect::<Vec<_>>()
+        };
+        let (ours, pack) = (motion(&horizon, false), motion(&gl, true));
+        // The vectors differ pixel to pixel (1.5 times the dilated depth in x).
+        assert!((ours[0] - ours[ours.len() - 2]).abs() > 0.1, "{ours:?}");
+        for (a, b) in ours.iter().zip(&pack) {
+            assert!((a - b).abs() < 1e-4, "{a} against {b}");
+        }
     }
 
     /// Something moving on its own with its own motion vectors (the camera still): the
