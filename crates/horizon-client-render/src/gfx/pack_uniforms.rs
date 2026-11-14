@@ -1185,6 +1185,10 @@ pub fn index_in(name: &str, geometry: bool) -> Option<usize> {
         "dhProjectionInverse" => index("gbufferProjectionInverse"),
         "dhPreviousProjection" => index("gbufferPreviousProjection"),
         "dhNearPlane" => index("near"),
+        // The tiles share the camera's view too (Photon reads DH's own model-view in its DH paths).
+        "dhModelView" => index("gbufferModelView"),
+        "dhModelViewInverse" => index("gbufferModelViewInverse"),
+        "dhPreviousModelView" => index("gbufferPreviousModelView"),
         _ => index(name),
     }
 }
@@ -1192,6 +1196,19 @@ pub fn index_in(name: &str, geometry: bool) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DH's matrices read the camera's: Horizon draws its far tiles with them.
+    #[test]
+    fn dh_matrices_are_the_cameras() {
+        for (dh, camera) in [
+            ("dhProjection", "gbufferProjection"),
+            ("dhModelView", "gbufferModelView"),
+            ("dhModelViewInverse", "gbufferModelViewInverse"),
+        ] {
+            assert_eq!(index_in(dh, true), index(camera));
+            assert!(index(camera).is_some());
+        }
+    }
 
     #[test]
     fn values_follow_the_declared_type() {
