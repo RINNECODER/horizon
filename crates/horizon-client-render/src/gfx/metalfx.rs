@@ -41,7 +41,6 @@ impl MetalFx {
     /// don't call for it.
     pub fn spatial(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::TextureView,
         input_size: [u32; 2],
@@ -53,11 +52,11 @@ impl MetalFx {
         #[cfg(target_os = "macos")]
         {
             let out = output_size(input_size, window)?;
-            self.imp.spatial(queue, encoder, input, input_size, out)
+            self.imp.spatial(encoder, input, input_size, out)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (queue, encoder, input, input_size, window);
+            let _ = (encoder, input, input_size, window);
             None
         }
     }
@@ -67,7 +66,6 @@ impl MetalFx {
     #[cfg(target_os = "macos")]
     pub fn temporal(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &super::world_post::UpscaleFrame<'_>,
         motion: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
@@ -83,13 +81,22 @@ impl MetalFx {
             jitter_pixels: frame.jitter_pixels,
             reset: frame.reset,
         };
-        self.imp.temporal(queue, encoder, &frame, motion)
+        self.imp.temporal(encoder, &frame, motion)
     }
 
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
+
+    /// The command buffers the frame was split into so far, to submit before its own.
+    pub fn take_pending(&mut self) -> Vec<wgpu::CommandBuffer> {
+        #[cfg(target_os = "macos")]
+        return self.imp.take_pending();
+        #[cfg(not(target_os = "macos"))]
+        Vec::new()
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::output_size;

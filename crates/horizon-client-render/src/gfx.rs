@@ -11906,7 +11906,14 @@ impl Renderer {
         // Frame generation presents its own frames (`frame_gen.present` below).
         // A `screenshot-sequence` frame is submitted here, so it can wait for it to
         // finish.
-        let (encoder, surface_frame, after) = if readback.is_none()
+        // MetalFX split the frame: its first part and MetalFX's go first.
+        let mut before = self.world_post.metalfx.take_pending();
+        if let Some((_, Some(post))) = &mut self.pack_post
+            && let Some(metalfx) = &mut post.metalfx
+        {
+            before.append(&mut metalfx.take_pending());
+        }
+        let (before, encoder, surface_frame, after) = if readback.is_none()
             && frame.pack.frame_timing.is_none()
             && fg_frames.is_none()
             && hdr_readback.is_none()
@@ -11935,6 +11942,7 @@ impl Renderer {
                 }) as submit::AfterSubmit
             });
             let job = submit::Job {
+                before,
                 encoder,
                 surface: surface_frame,
                 after,
@@ -11950,17 +11958,19 @@ impl Renderer {
                     self.shadow_visible = shadow_visible;
                     return Ok(true);
                 }
-                Err(back) => (back.encoder, back.surface, back.after),
+                Err(back) => (back.before, back.encoder, back.surface, back.after),
             }
         } else {
-            (encoder, surface_frame, None)
+            (before, encoder, surface_frame, None)
         };
         let commands = crate::spans::time("encode", || encoder.finish());
         if first_frame {
             startup_step(format_args!("submitting the first frame"));
             self.first_frame = FirstFrame::Drawn;
         }
-        let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        let submission = crate::spans::time("submit", || {
+            self.queue.submit(before.into_iter().chain([commands]))
+        });
         if let Some(read) = after.or_else(|| self.after_submit()) {
             read();
         }

@@ -6284,7 +6284,7 @@ impl PackPost {
             let upscaled = self
                 .metalfx
                 .as_mut()
-                .and_then(|m| m.spatial(queue, encoder, picture, size, window));
+                .and_then(|m| m.spatial(encoder, picture, size, window));
             let picture = upscaled.as_ref().unwrap_or(picture);
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shader pack final"),
