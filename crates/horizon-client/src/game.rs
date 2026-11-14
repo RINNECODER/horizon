@@ -11156,6 +11156,7 @@ impl Game<'_> {
                                 (ms(cpu), ms(elapsed)),
                             );
                             self.frame_stats.record_cpu(ms(cpu));
+                            self.frame_stats.record_made(r.last_made);
                             let render = r.last_encode;
                             self.frame_stats.record_phases([
                                 ms(updated - now),

@@ -1151,6 +1151,8 @@ pub struct Renderer {
     pub last_wait: std::time::Duration,
     /// CPU time of the last `render`, waits excluded.
     pub last_encode: std::time::Duration,
+    /// The last `render` also made a frame generation frame (the bench's presented fps).
+    pub last_made: bool,
     /// Watched only while HDR is On or Auto, including Auto in SDR;
     /// before `window`, so it's dropped first.
     display: Option<DisplayWatch>,
@@ -4881,6 +4883,7 @@ impl Renderer {
             lightmap_pixels: [0; 16 * 16 * 4],
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
+            last_made: false,
             window,
             ray_scene: surface_setup::ray_query::ray_scene::RayScene::new(&device),
             device,
@@ -12012,6 +12015,7 @@ impl Renderer {
         } else if let Some((real, generated)) = fg_frames {
             self.present_generated(real, generated, fg_made);
         }
+        self.last_made = fg_made && !frame_gen::generated_only();
         if self.surface.is_none() {
             // No swapchain paces offscreen frames: keep two on the GPU at most.
             self.in_flight.push_back(submission);
