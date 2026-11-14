@@ -622,6 +622,19 @@ mod tests {
     }
 
     #[test]
+    fn presented_fps_counts_frame_generation_frames() {
+        let mut stats = FrameStats::default();
+        for made in [true, true, false, true] {
+            stats.record(25.0);
+            stats.record_made(made);
+        }
+        let summary = stats.summary();
+        assert_eq!(summary["avg_fps"], 40.0);
+        assert_eq!(summary["made_frames"], 3);
+        assert_eq!(summary["presented_fps"], 70.0);
+    }
+
+    #[test]
     fn frame_summary_reports_block_entity_cache_work() {
         let mut stats = FrameStats::default();
         stats.record(10.0);
@@ -721,6 +734,8 @@ pub struct FrameStats {
     static_bytes_uploaded: u64,
     static_entities_drawn: u64,
     dynamic_entities_drawn: u64,
+    /// Frame generation frames made between the recorded ones.
+    made: u64,
     /// Window-thread allocations and bytes of each rendered frame (`alloc-count` builds).
     allocs: Vec<u32>,
     alloc_bytes: Vec<u64>,
@@ -792,6 +807,10 @@ impl FrameStats {
             .map(|(name, sum)| (name.to_string(), (sum / f64::from(n.max(1))).into()))
             .collect::<serde_json::Map<_, _>>()
             .into()
+    }
+    /// The frame also made a frame generation frame.
+    pub fn record_made(&mut self, made: bool) {
+        self.made += u64::from(made);
     }
     pub fn record_gpu(&mut self, millis: &[f32]) {
         if self.gpu.len() < Self::LIMIT {
@@ -888,6 +907,7 @@ impl FrameStats {
         self.static_bytes_uploaded = 0;
         self.static_entities_drawn = 0;
         self.dynamic_entities_drawn = 0;
+        self.made = 0;
         self.allocs.clear();
         self.alloc_bytes.clear();
         self.alloc_frees = 0;
@@ -926,6 +946,9 @@ impl FrameStats {
             "frames": n,
             "seconds": total / 1000.0,
             "avg_fps": n as f64 * 1000.0 / total,
+            // Real and frame generation frames shown: the made ones are shown between.
+            "made_frames": self.made,
+            "presented_fps": (n as f64 + self.made as f64) * 1000.0 / total,
             "low_1pct_fps": low(100),
             "low_01pct_fps": low(1000),
             "p50_ms": percentile(0.5),
