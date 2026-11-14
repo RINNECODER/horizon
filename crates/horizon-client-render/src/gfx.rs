@@ -5963,7 +5963,8 @@ impl Renderer {
                 page,
                 start,
                 solid_slots,
-                if packed { &[] } else { &mesh.solid_sources },
+                &mesh.solid_sources,
+                packed,
             );
         }
         if translucent_vertices > 0 {
@@ -5978,6 +5979,7 @@ impl Renderer {
                     translucent_at.1,
                     translucent_vertices,
                     &mesh.translucent_sources,
+                    false,
                 );
         }
         let translucent_arena = self.translucent_arena.as_ref().unwrap_or(&self.arena);

@@ -814,6 +814,8 @@ impl Dump {
             return;
         };
         let (mut set, mut total) = (0usize, 0usize);
+        // Also: the rows (y) holding set texels, and the set texels' values (first 4 bytes) by count.
+        let (mut rows, mut values, mut other) = ((u32::MAX, 0), Vec::<(u32, usize)>::new(), 0usize);
         for z in 0..d as usize {
             for y in 0..h as usize {
                 let start = (z * h as usize + y) * row as usize;
@@ -822,13 +824,25 @@ impl Dump {
                     total += 1;
                     if data[at..at + texel].iter().any(|&b| b != 0) {
                         set += 1;
+                        rows = (rows.0.min(y as u32), rows.1.max(y as u32));
+                        let mut v = [0u8; 4];
+                        let n = texel.min(4);
+                        v[..n].copy_from_slice(&data[at..at + n]);
+                        let v = u32::from_le_bytes(v);
+                        match values.iter().position(|e| e.0 == v) {
+                            Some(i) => values[i].1 += 1,
+                            None if values.len() < 40 => values.push((v, 1)),
+                            None => other += 1,
+                        }
                     }
                 }
             }
         }
         log::info!(
-            "shader pack image {}: {set} of {total} texels set",
-            self.name
+            "shader pack image {}: {set} of {total} texels set, rows {}..={}, values {values:x?}, other {other}",
+            self.name,
+            rows.0,
+            rows.1
         );
     }
 

@@ -56,6 +56,7 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
         first.1,
         4,
         &[source],
+        false,
     );
     let second = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
     assert_eq!(second, (first.0, GRAIN), "grew the first page");
@@ -73,6 +74,7 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
         reused.1,
         4,
         &[],
+        false,
     );
     uploads.finish(&encoder);
     queue.submit([encoder.finish()]);
@@ -81,7 +83,7 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
             &device,
             &queue,
             arena.sources(third.0).unwrap(),
-            third.1 / 4 * 8,
+            third.1 * 8,
             8
         ),
         bytemuck::bytes_of(&source)
@@ -91,7 +93,7 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
             &device,
             &queue,
             arena.sources(first.0).unwrap(),
-            first.1 / 4 * 8,
+            first.1 * 8,
             8
         ),
         [0; 8]
@@ -130,6 +132,7 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
         at.1,
         4,
         &[source],
+        false,
     );
     assert!(
         arena.sources(at.0).is_none(),
@@ -142,4 +145,41 @@ fn terrain_source_arena_gpu_grow_move_recycle_and_refusal() {
         read(&device, &queue, arena.buffer(at.0), at.1 * 24, 96),
         bytemuck::cast_slice::<_, u8>(&geometry)
     );
+}
+
+/// Compact solid quads (`mesher::packed`) keep their sources: quad k's on record slot k, which
+/// is the index a flat draw reads for a record. They were dropped, so every compact quad read
+/// as an unknown block (no `mc_Entity`, no `at_midBlock` light) in shader packs.
+#[test]
+fn compact_quads_keep_their_sources_by_slot() {
+    let instance = crate::gfx::test_gpu::instance();
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        return;
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let mut arena = Arena::new(&device, 24, GRAIN, true);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut uploads = super::super::upload::Uploads::new(&device);
+    // Two records, padded to 4 slots, then one quad kept as its four vertices: 8 slots.
+    let at = arena.alloc(&device, &mut encoder, 8).unwrap();
+    let a = TerrainSource::new(5, [1, 2, 3], 14, false);
+    let b = TerrainSource::new(6, [4, 5, 6], 15, false);
+    arena.write_sources(
+        &device,
+        &mut encoder,
+        &mut uploads,
+        at.0,
+        at.1,
+        8,
+        &[a, b],
+        true,
+    );
+    uploads.finish(&encoder);
+    queue.submit([encoder.finish()]);
+    let got = read(&device, &queue, arena.sources(at.0).unwrap(), at.1 * 8, 64);
+    let mut want = Vec::new();
+    want.extend_from_slice(bytemuck::bytes_of(&a));
+    want.extend_from_slice(bytemuck::bytes_of(&b));
+    want.resize(64, 0);
+    assert_eq!(got, want);
 }
