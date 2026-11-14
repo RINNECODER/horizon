@@ -85,7 +85,8 @@ impl FreeList {
 /// One vertex buffer of the arena; only the newest page grows.
 struct Page {
     buffer: wgpu::Buffer,
-    /// Optional shader-pack source records, indexed by the vertex index / 4.
+    /// Optional shader-pack source records, one per vertex slot: a quad's on each of its four
+    /// vertices, a compact record's on its slot (`mesher::packed`).
     sources: Option<wgpu::Buffer>,
     /// Capacity in vertices.
     capacity: u64,
@@ -300,13 +301,13 @@ impl Arena {
     }
 
     fn source_buffer(device: &wgpu::Device, capacity: u64) -> Option<wgpu::Buffer> {
-        if capacity / 4 * 8 > device.limits().max_storage_buffer_binding_size {
+        if capacity * 8 > device.limits().max_storage_buffer_binding_size {
             return None;
         }
         try_create(
             device,
             "Terrain quad sources",
-            capacity / 4 * 8,
+            capacity * 8,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -315,7 +316,10 @@ impl Arena {
 
     /// Native meshes allocate no sidecar. Once needed, existing pages also get a zeroed
     /// sidecar so moves can retain sources. Failure leaves geometry intact and attributes
-    /// unknown; a later source upload may retry its page.
+    /// unknown; a later source upload may retry its page. `sources` holds one per quad: on
+    /// each of its four vertices, or with `packed` (`mesher::packed`: quad k's record is
+    /// slot k) on the first slots.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_sources(
         &mut self,
         device: &wgpu::Device,
@@ -325,6 +329,7 @@ impl Arena {
         start: u64,
         vertices: u64,
         sources: &[crate::mesher::TerrainSource],
+        packed: bool,
     ) {
         if !sources.is_empty() && !self.sources_enabled {
             self.sources_enabled = true;
@@ -336,20 +341,18 @@ impl Arena {
         if p.sources.is_none() && !sources.is_empty() {
             p.sources = Self::source_buffer(device, p.capacity);
         }
-        if let Some(buffer) = &p.sources {
-            let bytes = vertices / 4 * 8;
-            if bytes > 0 {
-                // Recycled ranges must never keep another mesh's identity, even for a
-                // missing or incomplete sidecar. Zero records have no valid bit.
-                encoder.clear_buffer(buffer, start / 4 * 8, Some(bytes));
-                if sources.len() as u64 == vertices / 4 {
-                    uploads.buffer(
-                        encoder,
-                        buffer,
-                        start / 4 * 8,
-                        bytemuck::cast_slice(sources),
-                    );
-                }
+        if let Some(buffer) = &p.sources
+            && vertices > 0
+        {
+            // Recycled ranges must never keep another mesh's identity, even for a
+            // missing or incomplete sidecar. Zero records have no valid bit.
+            encoder.clear_buffer(buffer, start * 8, Some(vertices * 8));
+            let quads = sources.len() as u64;
+            if packed && quads > 0 && quads <= vertices {
+                uploads.buffer(encoder, buffer, start * 8, bytemuck::cast_slice(sources));
+            } else if !packed && quads == vertices / 4 && quads > 0 {
+                let each: Vec<_> = sources.iter().flat_map(|&s| [s; 4]).collect();
+                uploads.buffer(encoder, buffer, start * 8, bytemuck::cast_slice(&each));
             }
         }
     }
@@ -564,17 +567,17 @@ impl Arena {
             vertices * self.stride,
         );
         if let Some(to_sources) = self.sources(to.0) {
-            let bytes = vertices / 4 * 8;
+            let bytes = vertices * 8;
             if bytes > 0 {
                 match self.sources(from.0) {
                     Some(from_sources) => encoder.copy_buffer_to_buffer(
                         from_sources,
-                        from.1 / 4 * 8,
+                        from.1 * 8,
                         to_sources,
-                        to.1 / 4 * 8,
+                        to.1 * 8,
                         bytes,
                     ),
-                    None => encoder.clear_buffer(to_sources, to.1 / 4 * 8, Some(bytes)),
+                    None => encoder.clear_buffer(to_sources, to.1 * 8, Some(bytes)),
                 }
             }
         }

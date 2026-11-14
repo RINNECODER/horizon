@@ -835,7 +835,7 @@ impl PackAtlas {
             body.insert_str(0, PULL_FLAT);
             body.push_str(FACE);
             body.push_str(
-                "    uint hz_quad = uint(gl_VertexIndex) / 4u;\n    \
+                "    uint hz_quad = hz_slot;\n    \
                  uvec2 hz_source = uvec2(0u);\n    \
                  if (hz_quad < uint(hz_sources.length())) hz_source = hz_sources[hz_quad];\n    \
                  bool hz_known_source = (hz_source.y & 8192u) != 0u;\n    \
