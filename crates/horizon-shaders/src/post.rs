@@ -862,6 +862,12 @@ pub fn load_post(
         config: Config::default(),
         notes: Vec::new(),
     };
+    // shortcut: `frustum.culling = false` (draw terrain outside the view) is only reported;
+    // wire it into the section culling when a pack needs off-screen gbuffers draws.
+    if properties.get("frustum.culling").map(str::trim) == Some("false") {
+        post.notes
+            .push("`frustum.culling = false`: terrain outside the view stays culled".into());
+    }
     let options = crate::with_options(pack, macros);
     for e in &properties.entries {
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
@@ -2263,6 +2269,25 @@ mod tests {
         assert_eq!(
             post.notes,
             ["`size.buffer.colortex32`: not a buffer and a size"]
+        );
+    }
+
+    #[test]
+    fn frustum_culling_false_is_reported() {
+        let pack = Pack::from_zip_bytes(
+            "frustum.zip",
+            crate::pack::tests::zip(&[("shaders/final.fsh", "")]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let notes = |text: &str| {
+            let properties = Properties::parse(text, &macros);
+            load_post(&pack, "", &properties, &macros, &GameInputs::default()).notes
+        };
+        assert!(notes("frustum.culling = true\n").is_empty());
+        assert_eq!(
+            notes("frustum.culling = false\n"),
+            ["`frustum.culling = false`: terrain outside the view stays culled"]
         );
     }
 
