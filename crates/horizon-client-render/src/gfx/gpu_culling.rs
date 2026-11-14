@@ -3302,6 +3302,7 @@ mod tests {
                     let after = gpu.submitted().map(|g| Box::new(g) as AfterSubmit);
                     let sent = after.is_some();
                     let job = Job {
+                        before: Vec::new(),
                         encoder,
                         surface: None,
                         after,

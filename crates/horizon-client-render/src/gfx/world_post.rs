@@ -691,7 +691,6 @@ impl Post {
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
             let window = screen.texture().size();
             if let Some(view) = self.metalfx.spatial(
-                queue,
                 encoder,
                 &target.color,
                 target.size,
@@ -742,7 +741,7 @@ impl Post {
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
             };
-            if let Some(view) = self.metalfx.temporal(queue, encoder, &frame, motion) {
+            if let Some(view) = self.metalfx.temporal(encoder, &frame, motion) {
                 let group = self.bind(self.metalfx.device(), &view);
                 self.draw_onto(encoder, screen, &group, &self.copy, timing);
                 return;

@@ -336,6 +336,7 @@ mod tests {
                 if threaded {
                     let job = super::super::submit::Job {
                         encoder,
+                        before: Vec::new(),
                         surface: None,
                         after: Some(Box::new(after)),
                     };
@@ -408,6 +409,7 @@ mod tests {
                 .map(|f| Box::new(f) as super::super::submit::AfterSubmit);
             let job = super::super::submit::Job {
                 encoder,
+                before: Vec::new(),
                 surface: None,
                 after,
             };

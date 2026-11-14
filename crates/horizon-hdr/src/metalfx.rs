@@ -2,8 +2,10 @@
 //! Upscaler setting: the Metal calls the crates that forbid unsafe code can't make.
 //!
 //! wgpu forbids raw Metal commands in an encoder that records wgpu ones, so MetalFX gets
-//! an encoder of its own: the frame so far and MetalFX are submitted together (one Metal
-//! queue runs them in order) and the caller's encoder is swapped for a fresh one.
+//! an encoder of its own: the frame so far and MetalFX are finished there and handed to the
+//! frame's submit ([`State::take_pending`], first, in order), and the caller's encoder is
+//! swapped for a fresh one. (Submitting them at once fails: the frame's staging buffers
+//! are still mapped until its end.)
 //! Wherever MetalFX can't run (another backend, a format it refuses, the 16-bit HDR frame
 //! whose alpha marks it would not keep), nothing is drawn and the caller falls back.
 
@@ -61,6 +63,8 @@ pub struct State {
     /// -1 flips the jitter handed to MetalFX (`HORIZON_METALFX_JITTER=-1`), a developer's
     /// check of the convention.
     jitter_sign: f32,
+    /// This frame's command buffers so far (`encode`), for `take_pending`.
+    pending: Vec<wgpu::CommandBuffer>,
 }
 
 // Safety: Metal devices, textures and MetalFX scalers may be retained and released on any
@@ -110,14 +114,13 @@ fn takes(format: MTLPixelFormat) -> bool {
     .contains(&format)
 }
 
-/// Submit the frame so far and MetalFX's commands (`f`) after it; `encoder` continues
-/// the frame.
+/// The frame so far and MetalFX's commands (`f`) after it, to submit before the rest;
+/// `encoder` continues the frame.
 fn encode(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     f: impl FnOnce(&ProtocolObject<dyn MTLCommandBuffer>),
-) {
+) -> [wgpu::CommandBuffer; 2] {
     let mut own = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("MetalFX"),
     });
@@ -135,7 +138,7 @@ fn encode(
             label: Some("Horizon frame after MetalFX"),
         }),
     );
-    queue.submit([before.finish(), own.finish()]);
+    [before.finish(), own.finish()]
 }
 
 impl State {
@@ -147,7 +150,14 @@ impl State {
             temporal: None,
             refused: Vec::new(),
             jitter_sign: if flip { -1.0 } else { 1.0 },
+            pending: Vec::new(),
         }
+    }
+
+    /// The command buffers MetalFX split this frame into, in order: submit them before the
+    /// frame's own (its encoder holds what comes after).
+    pub fn take_pending(&mut self) -> Vec<wgpu::CommandBuffer> {
+        std::mem::take(&mut self.pending)
     }
 
     fn metal_device(&self) -> Option<Raw<dyn MTLDevice>> {
@@ -174,7 +184,6 @@ impl State {
 
     pub fn spatial(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::TextureView,
         input_size: [u32; 2],
@@ -227,16 +236,15 @@ impl State {
             s.scaler.setOutputTexture(Some(&s.output.0));
             s.scaler.setInputContentWidth(input_size[0] as usize);
             s.scaler.setInputContentHeight(input_size[1] as usize);
-            encode(&self.device, queue, encoder, |b| {
+            self.pending.extend(encode(&self.device, encoder, |b| {
                 s.scaler.encodeToCommandBuffer(b)
-            });
+            }));
             Some(s.output.1.clone())
         }
     }
 
     pub fn temporal(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &Frame<'_>,
         motion: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
@@ -307,7 +315,9 @@ impl State {
             s.setMotionVectorScaleX(key.0[0] as f32);
             s.setMotionVectorScaleY(key.0[1] as f32);
             s.setReset(frame.reset);
-            encode(&self.device, queue, encoder, |b| s.encodeToCommandBuffer(b));
+            self.pending.extend(encode(&self.device, encoder, |b| {
+                s.encodeToCommandBuffer(b)
+            }));
             Some(t.output.1.clone())
         }
     }

@@ -28,6 +28,9 @@ pub type AfterSubmit = Box<dyn FnOnce() + Send>;
 
 /// A frame for the submit thread: its commands and, in a window, the surface to present.
 pub struct Job {
+    /// Command buffers that run before `encoder`'s: the frame's part before MetalFX, and
+    /// MetalFX's (`gfx/metalfx.rs`).
+    pub before: Vec<wgpu::CommandBuffer>,
     pub encoder: wgpu::CommandEncoder,
     pub surface: Option<wgpu::SurfaceTexture>,
     pub after: Option<AfterSubmit>,
@@ -77,7 +80,7 @@ impl Queue {
             .spawn(move || {
                 for job in job_rx {
                     let commands = job.encoder.finish();
-                    let submission = queue.submit([commands]);
+                    let submission = queue.submit(job.before.into_iter().chain([commands]));
                     if let Some(after) = job.after {
                         after();
                     }
@@ -217,6 +220,7 @@ mod tests {
             let mut encoder = device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(&source, 0, &copy, 0, 4);
             let job = Job {
+                before: Vec::new(),
                 encoder,
                 surface: None,
                 after: None,
