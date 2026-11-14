@@ -209,9 +209,17 @@ pub(super) struct PackIds {
     old_lighting: bool,
     /// `separateAo`: `true` passes AO factor in vertex alpha and keeps pure tint in RGB.
     pub(super) separate_ao: bool,
+    /// Loaded with `DISTANT_HORIZONS` defined (`far_terrain_on`).
+    far_terrain: bool,
 }
 
 impl Game<'_> {
+    /// Far terrain draws past the chunks (Horizon's LODs, or a mod widening `terrain_distance`):
+    /// packs then get Iris's Distant Horizons inputs.
+    fn far_terrain_on(&self) -> bool {
+        self.terrain_distance() > self.streaming.radius
+    }
+
     /// Loads the pack for the current dimension when it changed, and returns this frame's
     /// inputs to the pack's uniforms.
     pub(super) fn shader_pack_inputs(
@@ -294,6 +302,16 @@ impl Game<'_> {
             self.reload_packs();
             return PackInputs::default();
         }
+        // Far terrain came on after the pack loaded (a far terrain session starts after the
+        // world): the pack loads again with `DISTANT_HORIZONS`. Only on, never off, so a far
+        // terrain session restarting doesn't reload it twice; turned off, the next load drops it.
+        let far_terrain = self.far_terrain_on();
+        if far_terrain && self.pack_ids.as_ref().is_some_and(|ids| !ids.far_terrain) {
+            self.pack_ids = None;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.drop_shader_packs();
+            }
+        }
         let name = selected.clone();
         let dimension = match self.dim {
             Dim::Overworld => 0,
@@ -318,6 +336,9 @@ impl Game<'_> {
                     Ok(pack) => {
                         let mut macros = Macros::standard();
                         renderer.define_pack_macros(&mut macros);
+                        if far_terrain {
+                            macros.define_distant_horizons();
+                        }
                         // Its conditionals test the pack's options too.
                         let (properties, notes) =
                             horizon_shaders::read_properties(&pack, &mut macros);
@@ -345,8 +366,13 @@ impl Game<'_> {
                                 })
                                 .collect(),
                         );
+                        renderer
+                            .set_pack_dh_materials(dh_materials(&self.pack.render.sprite_layers));
                         let folder = dimension_folder_named(&pack, self.dim.id(), dimension);
-                        let inputs = renderer.pack_inputs();
+                        let mut inputs = renderer.pack_inputs();
+                        if !far_terrain {
+                            inputs.far_terrain = None;
+                        }
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
                         // Textures that name one of the game's: from the resource packs over
                         // the game's own resources.
@@ -396,6 +422,7 @@ impl Game<'_> {
                                 .get("oldLighting")
                                 .is_some_and(|v| v.trim() == "true"),
                             separate_ao,
+                            far_terrain,
                             entities: entities.plain(),
                             missing_entity: if text.is_some() { 65535 } else { 0 },
                             missing_block: if ids.is_empty() { 0 } else { 65535 },
@@ -539,6 +566,9 @@ impl Game<'_> {
         let mut macros = Macros::standard();
         if let Some(renderer) = &self.renderer {
             renderer.define_pack_macros(&mut macros);
+        }
+        if self.far_terrain_on() {
+            macros.define_distant_horizons();
         }
         let name = &self.settings.horizon.shader_pack;
         self.settings.shader_options = read_shader_options(name, &self.settings.language, &macros);
@@ -1036,6 +1066,105 @@ fn fluid_pairs(layers: usize, fluids: impl IntoIterator<Item = u32>) -> Vec<i32>
         }
     }
     table
+}
+
+/// Each sprite layer's Distant Horizons material (`dhMaterialId`, an index of
+/// `horizon_shaders::DH_BLOCK_MATERIALS`), from its sprite's name.
+fn dh_materials(sprite_layers: &BTreeMap<String, u32>) -> Vec<u8> {
+    let mut classes = vec![0; sprite_layers.values().max().map_or(0, |&l| l as usize + 1)];
+    for (name, &layer) in sprite_layers {
+        classes[layer as usize] = dh_material(name) as u8;
+    }
+    classes
+}
+
+/// A sprite's class among `horizon_shaders::DH_BLOCK_MATERIALS`.
+/// shortcut: by sprite name, not by block as DH classes them; enough for packs that tell water,
+/// leaves, lava and lights apart. Upgrade to block facts if a pack needs more.
+fn dh_material(sprite: &str) -> usize {
+    let name = sprite.rsplit('/').next().unwrap_or(sprite);
+    let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    let class = if has(&["water"]) {
+        "WATER"
+    } else if has(&["lava"]) {
+        "LAVA"
+    } else if has(&[
+        "glowstone",
+        "sea_lantern",
+        "shroomlight",
+        "froglight",
+        "lantern",
+        "torch",
+        "magma",
+        "jack_o_lantern",
+        "redstone_lamp_on",
+    ]) {
+        "ILLUMINATED"
+    } else if has(&["leaves", "wart_block", "vine", "azalea"]) {
+        "LEAVES"
+    } else if has(&["grass", "moss", "fern"]) {
+        "GRASS"
+    } else if has(&["snow", "ice"]) {
+        "SNOW"
+    } else if has(&["deepslate"]) {
+        "DEEPSLATE"
+    } else if has(&["terracotta"]) {
+        "TERRACOTTA"
+    } else if has(&[
+        "netherrack",
+        "nylium",
+        "basalt",
+        "blackstone",
+        "soul_",
+        "end_stone",
+    ]) {
+        "NETHER_STONE"
+    } else if has(&["sand", "gravel"]) {
+        "SAND"
+    } else if has(&[
+        "dirt", "podzol", "mycelium", "mud", "farmland", "clay", "path",
+    ]) {
+        "DIRT"
+    } else if has(&["log", "planks", "wood", "stem", "hyphae", "bamboo"]) {
+        "WOOD"
+    } else if has(&["iron", "gold", "copper", "netherite", "chain", "anvil"]) {
+        "METAL"
+    } else if has(&[
+        "stone", "cobble", "andesite", "diorite", "granite", "tuff", "calcite", "ore", "bricks",
+    ]) {
+        "STONE"
+    } else {
+        "UNKNOWN"
+    };
+    horizon_shaders::DH_BLOCK_MATERIALS
+        .iter()
+        .position(|b| *b == class)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod dh_material_tests {
+    use super::{dh_material, dh_materials};
+
+    /// Sprites land in the DH classes packs test: water and lava by name, light-giving blocks
+    /// as illuminated, then by the block family; an unknown block is UNKNOWN (0).
+    #[test]
+    fn sprites_take_their_dh_class() {
+        let class = |s| horizon_shaders::DH_BLOCK_MATERIALS[dh_material(s)];
+        assert_eq!(class("minecraft:block/water_still"), "WATER");
+        assert_eq!(class("minecraft:block/lava_flow"), "LAVA");
+        assert_eq!(class("minecraft:block/glowstone"), "ILLUMINATED");
+        assert_eq!(class("minecraft:block/oak_leaves"), "LEAVES");
+        assert_eq!(class("minecraft:block/grass_block_top"), "GRASS");
+        assert_eq!(class("minecraft:block/deepslate"), "DEEPSLATE");
+        assert_eq!(class("minecraft:block/red_sandstone"), "SAND");
+        assert_eq!(class("minecraft:block/spruce_log"), "WOOD");
+        assert_eq!(class("minecraft:block/stone"), "STONE");
+        assert_eq!(class("minecraft:block/white_wool"), "UNKNOWN");
+        // Per layer, with unnamed layers UNKNOWN.
+        let layers = [("minecraft:block/water_still".to_owned(), 2)].into();
+        assert_eq!(dh_materials(&layers), [0, 0, 12]);
+    }
 }
 
 #[cfg(test)]

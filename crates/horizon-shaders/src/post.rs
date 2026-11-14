@@ -514,9 +514,11 @@ pub struct Post {
     pub terrain_undrawn: bool,
     pub water_undrawn: bool,
     /// `dh_terrain` and `dh_water` (Iris's Distant Horizons support): what draws the far tiles'
-    /// solid and translucent quads, each before its near kind, which then leaves the tiles out.
+    /// solid and translucent quads, each before its near kind, from the tiles' own draws.
     pub dh_terrain: Option<PostProgram>,
     pub dh_water: Option<PostProgram>,
+    /// `dh_shadow`: what draws the far tiles into the shadow map, when the shadow pass runs.
+    pub dh_shadow: Option<PostProgram>,
     /// What draws the sky (disc, sunset, stars, void) before terrain.
     pub sky: Option<PostProgram>,
     /// What draws the sun and moon, between the sunset and the stars.
@@ -622,6 +624,7 @@ impl Post {
             &self.water,
             &self.dh_terrain,
             &self.dh_water,
+            &self.dh_shadow,
             &self.sky,
             &self.sky_textured,
             &self.entities,
@@ -775,17 +778,9 @@ pub struct GameInputs {
     /// `gbuffers_skytextured` with a geometry stage.
     pub sky_geometry: Option<crate::GeometryInputs>,
     pub celestial_geometry: Option<crate::GeometryInputs>,
-    /// Far terrain's tiles for `dh_terrain` and `dh_water`, when the game draws them.
-    pub far_terrain: Option<FarInputs>,
-}
-
-/// What `dh_terrain` and `dh_water` read: `terrain`'s draws (sections and far tiles together)
-/// with the tiles' own inputs (`dhMaterialId`, the block's colour) and only the tiles kept.
-#[derive(Clone, Debug)]
-pub struct FarInputs {
-    pub inputs: GbuffersInputs,
-    /// Appended to `after` of the near programs a DH program takes the tiles from: drops them.
-    pub near_only: String,
+    /// What `dh_terrain` and `dh_water` read, when the game draws far terrain: the far tiles
+    /// alone, in draws of their own, with their own inputs (`dhMaterialId`, the block's colour).
+    pub far_terrain: Option<GbuffersInputs>,
 }
 
 /// Loads the post-processing programs of `folder` and, for the geometry `inputs` describes, the
@@ -830,6 +825,7 @@ pub fn load_post(
         water_undrawn: false,
         dh_terrain: None,
         dh_water: None,
+        dh_shadow: None,
         sky: None,
         sky_textured: None,
         entities: None,
@@ -1163,31 +1159,16 @@ pub fn load_post(
         });
     if let Some(terrain) = &inputs.terrain {
         // Distant Horizons' programs, as Iris has them with DH: the far tiles through dh_terrain
-        // and dh_water (no fallback: without one, the near program draws the tiles too), the near
-        // program of that kind then leaving them out.
+        // and dh_water (no fallback: without one, the near program draws the tiles too). The
+        // game gives each its own draws (`Post::dh_terrain`).
         let far = inputs.far_terrain.as_ref();
-        let dh_terrain =
-            far.and_then(|f| gbuffers(&["dh_terrain"], Group::Gbuffers, &f.inputs, None));
+        let dh_terrain = far.and_then(|f| gbuffers(&["dh_terrain"], Group::Gbuffers, f, None));
         let dh_water = far
-            .and_then(|f| gbuffers(&["dh_water"], Group::Translucent, &f.inputs, None))
+            .and_then(|f| gbuffers(&["dh_water"], Group::Translucent, f, None))
             .map(|mut p| {
                 p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
                 p
             });
-        let near = |inputs: &GbuffersInputs, dh: bool| {
-            let mut inputs = inputs.clone();
-            if let Some(f) = far.filter(|_| dh) {
-                inputs.after.push_str(&f.near_only);
-            }
-            inputs
-        };
-        let water_inputs = near(terrain, dh_water.is_some());
-        let near_parts = inputs
-            .terrain_parts
-            .as_ref()
-            .map(|parts| parts.each_ref().map(|p| near(p, dh_terrain.is_some())));
-        let terrain_parts = &near_parts;
-        let terrain = &near(terrain, dh_terrain.is_some());
         // Cutout terrain's alpha test, unless `alphaTest.*` says otherwise (3.2): alpha above
         // 0.5, which `alphaTestRef` reads. Iris 1.11.7 with probe packs of ours (#9307), through
         // gbuffers_terrain alone or gbuffers_terrain_cutout: cutout fragments written with alpha
@@ -1210,7 +1191,7 @@ pub fn load_post(
         // terrain gets no default alpha test, and alphaTestRef 0: in those probes Iris kept
         // solid fragments written with alpha 0.05, through either program, and also 0.0
         // through gbuffers_terrain alone or gbuffers_terrain_solid (#9307).
-        let parts = terrain_parts.as_ref().filter(|_| split_terrain);
+        let parts = inputs.terrain_parts.as_ref().filter(|_| split_terrain);
         let mut lone = None;
         let (solid, terrain_cutout) = match parts {
             Some([solid, cut]) => {
@@ -1252,7 +1233,7 @@ pub fn load_post(
             }
             None => match &inputs.terrain_one_pass {
                 Some(both) => {
-                    let mut both = near(both, dh_terrain.is_some());
+                    let mut both = both.clone();
                     if let Some(parts) = &mut both.parts {
                         parts.cutout_alpha_test = parts.cutout_alpha_test.or(cut);
                     }
@@ -1280,7 +1261,7 @@ pub fn load_post(
             Group::Translucent,
             &GbuffersInputs {
                 water_mask: true,
-                ..water_inputs
+                ..terrain.clone()
             },
             terrain_geometry,
         );
@@ -1347,6 +1328,7 @@ pub fn load_post(
         inputs.terrain_parts.as_ref(),
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
+        inputs.far_terrain.as_ref(),
     );
     post
 }
@@ -1363,6 +1345,7 @@ fn load_shadow(
     parts: Option<&[GbuffersInputs; 2]>,
     entities: Option<&GbuffersInputs>,
     geometry: [Option<&crate::GeometryInputs>; 2],
+    far: Option<&GbuffersInputs>,
 ) {
     let post = &*loader.post;
     let gbuffers = [
@@ -1532,6 +1515,20 @@ fn load_shadow(
             .push("shadow: no program; the shadow map stays clear".to_owned());
     }
     loader.geometry = None;
+    // Iris with DH: the far tiles cast shadows through dh_shadow alone (no fallback), with the
+    // shadow pass's terrain.
+    let dh_shadow = far
+        .filter(|_| keep("shadowTerrain"))
+        .and_then(|f| {
+            loader.load("dh_shadow".to_owned(), Group::Shadow, |v, fr| {
+                translate_shadow(v, fr, f)
+            })
+        })
+        .map(|mut p| {
+            p.blend = blend(properties, &p.name).flatten();
+            p
+        });
+    loader.post.dh_shadow = dh_shadow;
     loader.post.shadow = shadow;
     loader.post.shadow_cutout = shadow_cutout;
     loader.post.shadow_water = water;
@@ -3593,6 +3590,69 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         load_post(&pack, "", &properties, &macros, &inputs)
     }
 
+    /// Far tiles: a pack's dh_terrain and dh_water load when the game draws far terrain, beside
+    /// the near programs; without far terrain, or without the DH program, none (no fallback).
+    #[test]
+    fn dh_programs_load_with_far_terrain() {
+        let files = |programs: &[&str]| -> Vec<(String, &str)> {
+            (programs.iter())
+                .flat_map(|p| {
+                    [
+                        (format!("{p}.vsh"), TERRAIN_VSH),
+                        (format!("{p}.fsh"), TERRAIN_FSH),
+                    ]
+                })
+                .collect()
+        };
+        let load = |programs: &[&str], far: bool| {
+            let files: Vec<_> = files(programs)
+                .into_iter()
+                .map(|(n, s)| (format!("shaders/{n}"), s))
+                .collect();
+            let files: Vec<_> = files.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+            let pack = Pack::from_zip_bytes("dh", crate::pack::tests::zip(&files)).unwrap();
+            let terrain = crate::GbuffersInputs {
+                declarations: "layout(location = 0) in vec3 hz_v_pos;".into(),
+                body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n    hz_Color = vec4(1.0);\n".into(),
+                ..Default::default()
+            };
+            let inputs = GameInputs {
+                terrain: Some(terrain.clone()),
+                far_terrain: far.then_some(terrain),
+                ..Default::default()
+            };
+            let macros = Macros::standard();
+            let properties = Properties::parse("shadow.enabled=true", &macros);
+            load_post(&pack, "", &properties, &macros, &inputs)
+        };
+        let all = [
+            "gbuffers_terrain",
+            "gbuffers_water",
+            "dh_terrain",
+            "dh_water",
+            "shadow",
+            "dh_shadow",
+        ];
+        let post = load(&all, true);
+        assert_eq!(
+            post.dh_terrain.as_ref().map(|p| p.name.as_str()),
+            Some("dh_terrain")
+        );
+        assert_eq!(
+            post.dh_water.as_ref().unwrap().blend,
+            Some(TRANSLUCENT_BLEND)
+        );
+        assert!(post.terrain.is_some() && post.water.is_some());
+        assert!(post.shadow.is_some() && post.dh_shadow.is_some());
+        let post = load(&all, false);
+        assert!(post.dh_terrain.is_none() && post.dh_water.is_none() && post.dh_shadow.is_none());
+        let post = load(
+            &["gbuffers_terrain", "gbuffers_water", "dh_terrain", "shadow"],
+            true,
+        );
+        assert!(post.dh_terrain.is_some() && post.dh_water.is_none() && post.dh_shadow.is_none());
+    }
+
     /// `terrain_files` with `programs`, each writing white.
     fn terrain_pack(programs: &[&str], properties: &str, parts: bool) -> Post {
         let files: Vec<_> = (programs.iter())
@@ -3797,6 +3857,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             entity_geometry: None,
             sky_geometry: None,
             celestial_geometry: None,
+            far_terrain: None,
         };
         let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
         let (terrain, water) = (post.terrain.unwrap(), post.water.unwrap());

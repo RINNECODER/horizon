@@ -82,6 +82,10 @@ impl<T> Resident<T> {
                 .sum::<usize>()
             + self.column_index.capacity() * (size_of::<((i32, i32), u32)>() + 1)
     }
+    /// Whether column (x, z) has a resident section.
+    pub fn has_column(&self, x: i32, z: i32) -> bool {
+        self.column_index.contains_key(&(x, z))
+    }
     pub fn contains(&self, key: SectionKey) -> bool {
         self.slots.contains_key(&key)
     }

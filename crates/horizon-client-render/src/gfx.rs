@@ -1490,6 +1490,8 @@ pub struct Renderer {
     shadow_translucent_scratch: Vec<(u64, [u32; 5], (u32, Option<u32>))>,
     /// Lava's sprite layers, which a pack's solid terrain draws (`pack_atlas::game_terrain`).
     pack_lava_layers: Vec<u16>,
+    /// Each sprite layer's `dhMaterialId` (`set_pack_dh_materials`).
+    pack_dh_materials: Vec<u8>,
     pub hud: HudRenderer,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
@@ -5084,6 +5086,7 @@ impl Renderer {
             shadow_seen_scratch: crate::fast_hash::FxHashSet::default(),
             shadow_translucent_scratch: Vec::new(),
             pack_lava_layers: Vec::new(),
+            pack_dh_materials: Vec::new(),
             hud,
             menu_blur: None,
             post_effects: None,
@@ -6976,7 +6979,7 @@ impl Renderer {
         let sprite_rects = self
             .pack_atlas
             .as_ref()
-            .map_or_else(Vec::new, |a| a.rects_table());
+            .map_or_else(Vec::new, |a| a.rects_table(&self.pack_dh_materials));
         let post = pack.map(|post| {
             let world = pack_post::World {
                 atlas: self.pack_atlas.as_ref().map(|a| (a.view.clone(), a.size())),
@@ -7128,7 +7131,7 @@ impl Renderer {
         let sprite_rects = self
             .pack_atlas
             .as_ref()
-            .map_or_else(Vec::new, |a| a.rects_table());
+            .map_or_else(Vec::new, |a| a.rects_table(&self.pack_dh_materials));
         let material_maps = self
             .pack_material_atlases
             .as_ref()
@@ -7271,6 +7274,11 @@ impl Renderer {
     pub fn set_pack_lava_layers(&mut self, layers: Vec<u16>) {
         self.pack_lava_layers = layers;
     }
+    /// Each sprite layer's Distant Horizons material, which the far tiles' `dh_*` programs read
+    /// as `dhMaterialId` (`horizon_shaders::DH_BLOCK_MATERIALS` indices).
+    pub fn set_pack_dh_materials(&mut self, materials: Vec<u8>) {
+        self.pack_dh_materials = materials;
+    }
     /// Runs the sky, material and post stages of one of Horizon's own shader packs from now
     /// on (`None`: no pack), with its options' values; replaces a `shaders/` pack. Returns the
     /// stages' labels; on an error the pack that ran keeps running.
@@ -7347,6 +7355,12 @@ impl Renderer {
                     index: "hz_indices[@]".to_owned(),
                 }
             });
+        // The far tiles' programs read the atlas themselves, in flat draws (`PackAtlas::far_inputs`).
+        let far_terrain = self
+            .pack_atlas
+            .as_ref()
+            .filter(|_| self.pack_terrain_flat && terrain.is_some())
+            .map(pack_atlas::PackAtlas::far_inputs);
         horizon_shaders::GameInputs {
             terrain_geometry,
             entity_geometry: Some(pack_entities::geometry_inputs()),
@@ -7361,6 +7375,7 @@ impl Renderer {
             weather: Some(pack_weather::inputs()),
             lines: Some(pack_lines::inputs()),
             hand: Some(pack_hand::inputs()),
+            far_terrain,
             ..pack_atlas::game_terrain(terrain, &self.pack_lava_layers)
         }
     }
@@ -8394,6 +8409,14 @@ impl Renderer {
                     .filter(|_| !frame.title)?
                     .shadow_request(&state)
             });
+        // The far tiles' solid, translucent and shadow draws, kept apart for the pack's dh_terrain,
+        // dh_water and dh_shadow, so neither they nor the near programs go over the other's vertices.
+        let far_split = self
+            .pack_post
+            .as_ref()
+            .and_then(|p| p.1.as_ref())
+            .filter(|_| pack_terrain)
+            .map_or([false; 3], |p| p.far_programs());
         // `LevelRenderer.extractSectionDrawGroups`' fade-in time, for the instances.
         let fade_ms = fade_millis(frame.chunk_fade);
         // GPU culling's fading sections, decided at `fades.now`: before the gate, the record
@@ -8418,6 +8441,28 @@ impl Renderer {
         // `visible`. Decided before the walk, so that a pass whose buffers no longer fit can
         // still switch GPU culling off.
         let radius = (frame.detail_distance / 16.0) as i32;
+        // The columns near terrain draws, for the far tiles' programs to leave out: resident, and
+        // within the render distance or kept past it where the tiles leave them out (`lod_cutout`,
+        // the walk's `beyond`).
+        if far_split.contains(&true)
+            && let Some(post) = self.pack_post.as_ref().and_then(|p| p.1.as_ref())
+        {
+            let from = pack_terrain_camera(camera);
+            let mut words = Vec::new();
+            let center = resident::camera_column(camera);
+            pack_post::near_columns(
+                center,
+                radius + 2,
+                [from.x, from.z],
+                |x, z| {
+                    self.sections.has_column(x, z)
+                        && (crate::streaming::in_view_distance(center, radius, x, z)
+                            || self.lod_cutout.contains(&(x, z)))
+                },
+                &mut words,
+            );
+            post.set_near_columns(&self.queue, &words);
+        }
         let displaced = self
             .native
             .as_ref()
@@ -8528,6 +8573,9 @@ impl Renderer {
         }
         let mut shadow_visible = std::mem::take(&mut self.shadow_visible);
         shadow_visible.clear();
+        // The far tiles dh_shadow draws: those the light's box takes in, within the pack's shadow
+        // distance as sections are.
+        let mut shadow_lods = Vec::new();
         if let Some(v) = &shadow_view {
             let radius = (frame.detail_distance / 16.0) as i32;
             let light = ShadowCull {
@@ -8537,6 +8585,13 @@ impl Renderer {
             };
             let mut boxed = std::mem::take(&mut self.shadow_boxed_scratch);
             let mut seen = std::mem::take(&mut self.shadow_seen_scratch);
+            if far_split[2] && !frame.title {
+                shadow_lods.extend(
+                    self.lods
+                        .iter()
+                        .filter_map(|(&key, tile)| tile.visible(key, camera, &light, now)),
+                );
+            }
             crate::spans::time("shadow visibility", || {
                 // Within the unculled distance every section, then those in the light's box.
                 if let Some(d) = v.unculled {
@@ -8673,7 +8728,8 @@ impl Renderer {
                     shadow_visible
                         .iter()
                         .map(|v| section_instance(v.origin, 0, visibility(v.key))),
-                ),
+                )
+                .chain(shadow_lods.iter().map(|v| lod::instance(v.origin, v.fade))),
         );
         if !self.origins.is_empty() {
             self.uploads.buffer(
@@ -8751,6 +8807,7 @@ impl Renderer {
             }
         };
         let (mut opaque_draws, mut phase2_opaque) = (0, 0);
+        let mut far_solid_draws = 0;
         debug_assert!(
             !(split_solid && gpu_frame),
             "GPU culling is never offered on Metal"
@@ -8859,7 +8916,12 @@ impl Renderer {
                     draws.push([quads * 6, instances, 0, base, index as u32]);
                     pages.push((s.page, None));
                 });
+                // For dh_terrain, in a group after the near terrain's (culling is off with a pack).
+                let group = if far_split[0] { 2 } else { group };
                 *run = (group, start, draws.len() - start);
+                if far_split[0] {
+                    far_solid_draws += draws.len() - start;
+                }
             }
             let runs = &runs[..parts.len()];
             let (Some(bounds), Some(c)) = (tested, &mut cull) else {
@@ -8917,6 +8979,8 @@ impl Renderer {
         self.draw_pages.extend_from_slice(&self.phase2_pages);
         let culling = cull.is_some();
         let solid_draws = self.draws.len() as u32;
+        // Where the far tiles' solid and translucent draws begin (`Flat::far_calls`).
+        let mut far_draws = [solid_draws - far_solid_draws as u32, 0, 0];
         // Phase 2's draws `[phase1_draws..phase2_cutout]` hold opaque quads, the rest
         // cutout ones (without the split, all of them go through one pipeline).
         let phase2_cutout = phase1_draws + phase2_opaque as u32;
@@ -9032,6 +9096,11 @@ impl Renderer {
         self.translucency_cursor += budget;
         let translucent_draws = self.draws.len() as u32 - solid_draws;
         let section_draws = self.draws.len();
+        far_draws[1] = if far_split[1] {
+            solid_draws + section_translucent as u32
+        } else {
+            section_draws as u32
+        };
         // The shadow camera's sections after the camera's: quads that can face the light (all of
         // them for `every_face`), then translucent ones (in their last sorted order; depth
         // decides there).
@@ -9112,6 +9181,22 @@ impl Renderer {
             (shadow_first + shadow_solid) as usize,
         );
         let shadow_translucent = self.draws.len() as u32 - shadow_first - shadow_solid;
+        // The far tiles' shadow for dh_shadow, last. shortcut: their solid quads only (no water's
+        // shadow); add their sorted translucent draws if a pack shades by distant water.
+        far_draws[2] = self.draws.len() as u32;
+        if let Some(view) = &shadow_view {
+            let base = listed + shadow_visible.len();
+            for (j, v) in shadow_lods.iter().enumerate() {
+                let s = self.lods[&v.key].drawn();
+                let instance = (base + j) as u32;
+                shadow_runs(&s.sides, view, v.origin, |first, quads| {
+                    self.draws
+                        .push([quads * 6, 1, 0, s.solid_base() + first * 4, instance]);
+                    self.draw_pages.push((s.page, None));
+                });
+            }
+        }
+        let shadow_far = self.draws.len() as u32 - far_draws[2];
         laps.lap("r_nearby");
         // Metal replays a multi-draw as one draw call per entry.
         let mut section_draw_calls = if self.multi_draw && self.info.backend != wgpu::Backend::Metal
@@ -9762,6 +9847,7 @@ impl Renderer {
                         solid_draws as usize,
                         [shadow_first, shadow_first + shadow_solid].map(|d| d as usize),
                         [opaque_end, cutout_start, phase2_cutout as usize],
+                        far_draws.map(|d| d as usize),
                         phase2,
                         self.translucent_arena.is_some(),
                         visible
@@ -9775,7 +9861,7 @@ impl Renderer {
                                     section_instance(v.origin, code, visibility(v.key)),
                                 ))
                             })
-                            .chain(visible_lods.iter().filter_map(|v| {
+                            .chain(visible_lods.iter().chain(&shadow_lods).filter_map(|v| {
                                 let id = lods[&v.key].drawn().flat_id?;
                                 Some((id, lod::instance(v.origin, v.fade)))
                             })),
@@ -11498,7 +11584,8 @@ impl Renderer {
                  page: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
                  geometry: Option<(u32, &wgpu::BindGroupLayout)>| {
                     use pack_post::TerrainList as L;
-                    let shadow = matches!(list, L::ShadowSolid | L::ShadowTranslucent);
+                    let shadow =
+                        matches!(list, L::ShadowSolid | L::ShadowTranslucent | L::ShadowFar);
                     if !(if shadow {
                         pack_draws_shadow
                     } else {
@@ -11509,11 +11596,15 @@ impl Renderer {
                     match flat {
                         Some(flat) => {
                             let [shadow, shadow_translucent] = flat.shadow_calls;
+                            let [far_solid, far_translucent, far_shadow] = flat.far_calls;
                             let calls = match list {
-                                L::Solid => &flat.calls[..flat.solid_calls],
-                                L::Translucent => flat.translucent_calls(),
+                                L::Solid => &flat.calls[..far_solid],
+                                L::Translucent => &flat.calls[flat.solid_calls..far_translucent],
+                                L::FarSolid => &flat.calls[far_solid..flat.solid_calls],
+                                L::FarTranslucent => &flat.calls[far_translucent..shadow],
                                 L::ShadowSolid => &flat.calls[shadow..shadow_translucent],
-                                L::ShadowTranslucent => &flat.calls[shadow_translucent..],
+                                L::ShadowTranslucent => &flat.calls[shadow_translucent..far_shadow],
+                                L::ShadowFar => &flat.calls[far_shadow..],
                             };
                             match geometry {
                                 Some((instances, layout)) => {
@@ -11545,12 +11636,17 @@ impl Renderer {
                             rp.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                             rp.set_vertex_buffer(1, self.instances.slice(..));
                             let (first, count) = match list {
-                                L::Solid => (0, solid_draws),
-                                L::Translucent => (solid_draws, translucent_draws),
+                                L::Solid => (0, far_draws[0]),
+                                L::Translucent => (solid_draws, far_draws[1] - solid_draws),
+                                L::FarSolid => (far_draws[0], solid_draws - far_draws[0]),
+                                L::FarTranslucent => {
+                                    (far_draws[1], solid_draws + translucent_draws - far_draws[1])
+                                }
                                 L::ShadowSolid => (shadow_first, shadow_solid),
                                 L::ShadowTranslucent => {
                                     (shadow_first + shadow_solid, shadow_translucent)
                                 }
+                                L::ShadowFar => (far_draws[2], shadow_far),
                             };
                             self.draw_sections(rp, &self.indirect, 0, first, count);
                         }

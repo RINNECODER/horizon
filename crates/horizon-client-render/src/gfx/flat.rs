@@ -50,6 +50,8 @@ struct Plan {
     /// Where Metal's opaque pass ends and its cutout pass begins in phase 1's calls,
     /// and where its cutout pass begins in phase 2's.
     pass_calls: [usize; 3],
+    /// Where the far tiles' solid, translucent and shadow calls begin (`Flat::far_calls`).
+    far_calls: [usize; 3],
     total: u64,
 }
 const QUADS: u32 = u32::MAX;
@@ -155,6 +157,10 @@ pub struct Flat {
     /// begin (`calls.len()` without them): the camera's translucent calls
     /// end at the first.
     pub shadow_calls: [usize; 2],
+    /// Where a shader pack's far tiles' calls begin, kept apart for its `dh_terrain`,
+    /// `dh_water` and `dh_shadow`: the solid ones end at `solid_calls`, the translucent
+    /// ones at `shadow_calls[0]`, the shadow ones at the end. Without them each is the end.
+    pub far_calls: [usize; 3],
     /// Frames with fewer sections in view keep the per-section draws.
     pub min_sections: usize,
     range_align: u64,
@@ -320,7 +326,8 @@ fn buffer(
 /// from `shadow[0]` (solid) and `shadow[1]` (translucent) on are a shader
 /// pack's shadow camera's, with calls of their own. Phase 1's draws before
 /// `passes[0]` and from `passes[1]` on, the two solid passes' on Metal, too,
-/// and phase 2's from `passes[2]` on (its cutout pass's).
+/// and phase 2's from `passes[2]` on (its cutout pass's). Draws from `far[0]`,
+/// `far[1]` and `far[2]` on are the far tiles' solid, translucent and shadow ones.
 #[allow(clippy::too_many_arguments)]
 fn plan(
     draws: &[[u32; 5]],
@@ -329,6 +336,7 @@ fn plan(
     solid_draws: usize,
     shadow: [usize; 2],
     passes: [usize; 3],
+    far: [usize; 3],
     align: u64,
     key: impl Fn(u32, Option<u32>) -> u32,
     calls: &mut Vec<Call>,
@@ -341,6 +349,7 @@ fn plan(
     let (mut phase1_calls, mut solid_calls) = (None, None);
     let mut shadow_calls = [None; 2];
     let mut pass_calls = [None; 3];
+    let mut far_calls = [None; 3];
     let mut total = 0u64;
     let mut by_source: Vec<(Source, Vec<Range>)> = Vec::new();
     for (i, (d, &(page, sorted))) in draws.iter().zip(pages).enumerate() {
@@ -360,8 +369,16 @@ fn plan(
                 pass_calls[k].get_or_insert(calls.len());
             }
         }
-        let starts =
-            i == phase1_draws || i == solid_draws || shadow.contains(&i) || passes.contains(&i);
+        for (k, &from) in far.iter().enumerate() {
+            if i == from {
+                far_calls[k].get_or_insert(calls.len());
+            }
+        }
+        let starts = i == phase1_draws
+            || i == solid_draws
+            || shadow.contains(&i)
+            || passes.contains(&i)
+            || far.contains(&i);
         let page = key(page, sorted);
         match calls.last_mut() {
             Some(last) if last.page == page && !starts => last.count += d[0],
@@ -398,10 +415,17 @@ fn plan(
     }
     let solid_calls = solid_calls.unwrap_or(calls.len());
     let phase1_calls = phase1_calls.unwrap_or(calls.len()).min(solid_calls);
+    let shadow_calls = shadow_calls.map(|c| c.unwrap_or(calls.len()));
+    let [far_solid, far_translucent, far_shadow] = far_calls.map(|c| c.unwrap_or(calls.len()));
     Plan {
         phase1_calls,
         solid_calls,
-        shadow_calls: shadow_calls.map(|c| c.unwrap_or(calls.len())),
+        shadow_calls,
+        far_calls: [
+            far_solid.min(solid_calls),
+            far_translucent.min(shadow_calls[0]).max(solid_calls),
+            far_shadow.max(shadow_calls[1]),
+        ],
         pass_calls: {
             let [opaque, cutout, phase2] = pass_calls.map(|c| c.unwrap_or(calls.len()));
             [
@@ -587,6 +611,7 @@ impl Flat {
             solid_calls: 0,
             pass_calls: [0; 3],
             shadow_calls: [0; 2],
+            far_calls: [0; 3],
             min_sections,
             range_align: (u64::from(device.limits().min_storage_buffer_offset_alignment) / 16)
                 .max(1),
@@ -707,6 +732,7 @@ impl Flat {
         solid_draws: usize,
         shadow: [usize; 2],
         passes: [usize; 3],
+        far: [usize; 3],
         phase2: Option<&wgpu::Buffer>,
         translucent_arena: bool,
         origins: impl Iterator<Item = (u32, [f32; 4])>,
@@ -753,6 +779,7 @@ impl Flat {
             solid_calls,
             shadow_calls,
             pass_calls,
+            far_calls,
             total,
         } = plan(
             draws,
@@ -761,6 +788,7 @@ impl Flat {
             solid_draws,
             shadow,
             passes,
+            far,
             self.range_align,
             // Translucent draws, and only they, have sorted indices.
             |page, sorted| match sorted {
@@ -775,11 +803,13 @@ impl Flat {
         self.solid_calls = solid_calls;
         self.shadow_calls = shadow_calls;
         self.pass_calls = pass_calls;
+        self.far_calls = far_calls;
         if total == 0 || total * 4 > device.limits().max_storage_buffer_binding_size {
             // Do not retain bindings for a frame that cannot use flat draws.
             self.phase2_group = None;
             self.groups.clear();
             self.calls.clear();
+            self.far_calls = [0; 3];
             self.phase1_calls = 0;
             self.solid_calls = 0;
             self.shadow_calls = [0; 2];
@@ -1273,6 +1303,7 @@ mod tests {
             solid,
             [draws.len(); 2],
             [draws.len(), 0, solid],
+            [usize::MAX; 3],
             4,
             |page, _| page,
             &mut calls,
@@ -1322,6 +1353,7 @@ mod tests {
             solid,
             [draws.len(); 2],
             [3, 1, solid],
+            [usize::MAX; 3],
             4,
             |page, _| page,
             &mut calls,
@@ -1342,6 +1374,41 @@ mod tests {
         );
     }
 
+    /// Far tiles drawn by a pack's DH programs start calls of their own, even from the same
+    /// page; a list with none of them keeps its end.
+    #[test]
+    fn plan_gives_far_tiles_calls_of_their_own() {
+        let (draws, pages, solid) = sample();
+        let (mut calls, mut ranges, mut segments) = (Vec::new(), Vec::new(), Vec::new());
+        let plan = plan(
+            &draws,
+            &pages,
+            solid,
+            solid,
+            [draws.len(); 2],
+            [draws.len(), 0, solid],
+            [1, 5, usize::MAX],
+            4,
+            |page, _| page,
+            &mut calls,
+            &mut ranges,
+            &mut segments,
+        );
+        assert_eq!((plan.solid_calls, plan.far_calls), (4, [1, 5, 6]));
+        let call = |page, first, count| Call { page, first, count };
+        assert_eq!(
+            calls,
+            [
+                call(0, 0, 18),
+                call(0, 18, 12),
+                call(1, 30, 6),
+                call(0, 36, 24),
+                call(0, 60, 12),
+                call(0, 72, 6)
+            ]
+        );
+    }
+
     /// A shader pack's shadow draws follow the camera's, in calls of their
     /// own even from the same page: solid ones, then translucent ones.
     #[test]
@@ -1358,6 +1425,7 @@ mod tests {
             solid,
             [camera, camera + 2],
             [camera, 0, solid],
+            [usize::MAX; 3],
             4,
             |page, _| page,
             &mut calls,
@@ -1387,6 +1455,7 @@ mod tests {
             solid,
             [draws.len(); 2],
             [draws.len(), 0, solid],
+            [usize::MAX; 3],
             4,
             |page, _| page,
             &mut calls,
@@ -1400,6 +1469,7 @@ mod tests {
                 solid_calls: 3,
                 shadow_calls: [4, 4],
                 pass_calls: [1, 0, 3],
+                far_calls: [3, 4, 4],
                 total: 6 * 13
             }
         );
@@ -1505,6 +1575,7 @@ mod tests {
                 solid,
                 [draws.len(); 2],
                 [draws.len(), 0, solid],
+                [usize::MAX; 3],
                 align,
                 |page, _| page,
                 &mut calls,

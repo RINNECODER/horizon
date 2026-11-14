@@ -312,7 +312,7 @@ fn sample(
     let rects = buffer(
         bytemuck::cast_slice(&super::super::pack_post::terrain_tables(
             &[],
-            &atlas.rects_table(),
+            &atlas.rects_table(&[]),
         )),
         wgpu::BufferUsages::STORAGE,
     );

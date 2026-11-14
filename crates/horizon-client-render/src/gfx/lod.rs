@@ -1,6 +1,6 @@
 //! Far meshes share the terrain arenas and passes, with their actual bounds
 //! rather than the 16³ boxes used by the near-section residency walk.
-use super::{Frustum, Renderer, SectionGpu};
+use super::{Cull, Renderer, SectionGpu};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
     lod::{MAX_LEVEL, TileKey},
@@ -116,7 +116,7 @@ impl Bounds {
     /// In view: the plan alone decides which tiles are in range (a circle),
     /// so a tile leaving it fades out (`upload_lods`). Cut here at the range,
     /// tiles popped out as the player moved, before the plan dropped them.
-    fn visible(self, origin: DVec3, frustum: &Frustum) -> Option<u64> {
+    fn visible(self, origin: DVec3, frustum: &impl Cull) -> Option<u64> {
         let min = origin + self.min.as_dvec3();
         let max = origin + self.max.as_dvec3();
         if !frustum.intersects(min.as_vec3(), max.as_vec3()) {
@@ -187,7 +187,7 @@ impl Tile {
         &self,
         key: TileKey,
         camera: DVec3,
-        frustum: &Frustum,
+        frustum: &impl Cull,
         now: Instant,
     ) -> Option<Visible> {
         let fade = match self.dying {
@@ -508,6 +508,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gfx::Frustum;
     use crate::mesher::TerrainVertex;
 
     #[test]
