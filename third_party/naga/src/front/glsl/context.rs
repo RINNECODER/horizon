@@ -426,6 +426,21 @@ impl<'a> Context<'a> {
     /// - If more than one [`StmtContext`] are active at the same time or if the
     ///   previous call didn't use it in lowering.
     #[must_use]
+    /// Runs `f` on a constant expression in this context's scope, so a function's local `const`s
+    /// (module constants) stay visible: `const int n = 4; float a[n];`.
+    pub fn in_const_scope<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, StmtContext) -> Result<R>,
+    ) -> Result<R> {
+        // An enclosing expression may hold the statement context: keep it aside.
+        let saved = self.stmt_ctx.take();
+        let was_const = core::mem::replace(&mut self.is_const, true);
+        let res = f(self, StmtContext::new());
+        self.is_const = was_const;
+        self.stmt_ctx = saved;
+        res
+    }
+
     pub const fn stmt_ctx(&mut self) -> StmtContext {
         self.stmt_ctx.take().unwrap()
     }

@@ -619,6 +619,31 @@ fn log_outside_domain_compiles() {
         .unwrap();
 }
 
+/// A prototype's function is defined after a function it calls, and a local `const` sizes an
+/// array: both are valid GLSL and give a valid module.
+#[test]
+fn prototype_calling_later_function_and_local_const_array_size() {
+    let module = Frontend::default()
+        .parse(
+            &Options::from(ShaderStage::Vertex),
+            r#"
+        #  version 450
+        float a(float x);
+        float b(float x) { return x * 2.0; }
+        void main() {
+            const int n = 3;
+            float v[n] = float[n](a(1.0), 2.0, 3.0);
+            gl_Position = vec4(v[0], v[1], v[2], 1.0);
+        }
+        float a(float x) { return b(x) + 1.0; }
+        "#,
+        )
+        .unwrap();
+    crate::valid::Validator::new(Default::default(), crate::valid::Capabilities::all())
+        .validate(&module)
+        .unwrap();
+}
+
 #[test]
 fn function_overloading() {
     let mut frontend = Frontend::default();

@@ -205,11 +205,18 @@ impl<'source> ParsingContext<'source> {
         frontend: &mut Frontend,
         ctx: &mut Context,
     ) -> Result<(u32, Span)> {
-        let (const_expr, meta) = self.parse_constant_expression(
-            frontend,
-            ctx.module,
-            ctx.global_expression_kind_tracker,
-        )?;
+        let (const_expr, meta) = if ctx.is_const {
+            self.parse_constant_expression(
+                frontend,
+                ctx.module,
+                ctx.global_expression_kind_tracker,
+            )?
+        } else {
+            ctx.in_const_scope(|ctx, mut stmt_ctx| {
+                let expr = self.parse_conditional(frontend, ctx, &mut stmt_ctx, None)?;
+                ctx.lower_expect(stmt_ctx, frontend, expr, ExprPos::Rhs)
+            })?
+        };
 
         let res = ctx.module.to_ctx().get_const_val(const_expr);
 
