@@ -293,7 +293,7 @@ pub struct PostProgram {
     pub buffer_blends: Vec<(u32, Option<Blend>)>,
     /// Bit n: `colortex<n>MipmapEnabled` in its fragment stage, so buffer n's mip chain is
     /// regenerated right before it (6.1.7; not for gbuffers programs).
-    pub mipmaps: u16,
+    pub mipmaps: u32,
     /// Compute programs that run before this one, in order: `<name>.csh`, then `_a` to `_z`.
     pub compute: Vec<(String, ComputeProgram)>,
     /// A geometry stage folded into the vertex stage (`translate_geometry`): drawn non-indexed,
@@ -2241,6 +2241,29 @@ mod tests {
             assert_eq!(post.images.len(), 1);
             assert_eq!(post.images[0].size, ImageSize::Absolute(expected));
         }
+    }
+
+    #[test]
+    fn buffers_go_up_to_colortex31() {
+        // Iris 1.10.5 and later: 32 colortex buffers.
+        let pack = Pack::from_zip_bytes(
+            "sizes.zip",
+            crate::pack::tests::zip(&[("shaders/final.fsh", "")]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse(
+            "size.buffer.colortex16 = 0.25 0.25\nsize.buffer.colortex31 = 8 8\n\
+             size.buffer.colortex32 = 0.5 0.5\n",
+            &macros,
+        );
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert_eq!(post.sizes[16], Some(BufferSize::Relative([0.25, 0.25])));
+        assert_eq!(post.sizes[31], Some(BufferSize::Absolute([8, 8])));
+        assert_eq!(
+            post.notes,
+            ["`size.buffer.colortex32`: not a buffer and a size"]
+        );
     }
 
     #[test]

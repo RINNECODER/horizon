@@ -141,7 +141,7 @@ impl Macros {
         m.define("MC_RENDER_QUALITY", "1.0");
         m.define("MC_SHADOW_QUALITY", "1.0");
         m.define("MC_HAND_DEPTH", "0.125");
-        m.define("MAX_COLOR_BUFFERS", "16");
+        m.define("MAX_COLOR_BUFFERS", crate::BUFFERS.to_string());
         // The normal and specular maps are on (OptiFine's shaders.txt, H: their options, on by
         // default; Iris 1.11.7 defines both too, with or without a resource pack's maps).
         m.define("MC_NORMAL_MAP", "");

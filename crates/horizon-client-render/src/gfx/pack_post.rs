@@ -305,7 +305,7 @@ impl Image {
 }
 
 /// The buffers and the pack images (masks) `images` read as copies taken before a dispatch.
-fn befores(images: &[(u32, Image)]) -> (u16, u64) {
+fn befores(images: &[(u32, Image)]) -> (u32, u64) {
     images
         .iter()
         .fold((0, 0), |(colors, customs), i| match i.1 {
@@ -316,7 +316,7 @@ fn befores(images: &[(u32, Image)]) -> (u16, u64) {
 }
 
 /// The color buffers of `images`, as a mask.
-fn image_buffers(images: &[(u32, Image)]) -> u16 {
+fn image_buffers(images: &[(u32, Image)]) -> u32 {
     images
         .iter()
         .filter_map(|i| i.1.buffer())
@@ -348,7 +348,7 @@ fn image_formats(
 }
 
 /// The shadowcolor buffers of `images` outside the shadow buffers' programs, as a mask.
-fn shadow_images(images: &[(u32, Image)]) -> u16 {
+fn shadow_images(images: &[(u32, Image)]) -> u32 {
     images.iter().fold(0, |m, i| match i.1 {
         Image::ShadowColor(n) => m | 1 << n,
         _ => m,
@@ -499,17 +499,17 @@ struct Pass {
     /// (location, buffer) of each output that reaches a buffer.
     writes: Vec<(u32, usize)>,
     /// Buffers flipped after the pass.
-    flip: u16,
+    flip: u32,
     /// `hz_depth_linear`: which of the depth samplers a plain sampler reads filter.
     depth_linear: [f32; 4],
     /// Buffers sampled, for the bind group cache key.
-    reads: u16,
+    reads: u32,
     /// shadowcolor buffers sampled by a program of the other buffers.
-    shadow_reads: u16,
+    shadow_reads: u32,
     /// Buffers written.
-    written: u16,
+    written: u32,
     /// Buffers whose mip chain is regenerated right before it (6.1.7).
-    mipmaps: u16,
+    mipmaps: u32,
     /// Reads the per-draw block (`DrawUniforms`).
     draw: bool,
     /// What `texture` reads instead of the block atlas.
@@ -522,16 +522,16 @@ struct Pass {
     ids: bool,
     /// Bind groups by the sides read (bits 0–15), the buffers whose mip chain is current (bits
     /// 16–31) and the shadowcolor sides read (bits 32–33).
-    groups: HashMap<u64, wgpu::BindGroup>,
+    groups: HashMap<u128, wgpu::BindGroup>,
     /// The same for End portal draws, with `end_portal.png` bound as the atlas.
-    portal_groups: HashMap<u64, wgpu::BindGroup>,
+    portal_groups: HashMap<u128, wgpu::BindGroup>,
     /// (binding, target) of each image: for a buffer, the side its sampler reads.
     images: Vec<(u32, Image)>,
     /// Binds the pack's storage buffers in set 4.
     buffers: bool,
     /// Buffers both sampled and bound as images: sampled from a copy taken first, as wgpu binds
     /// a texture one way per pass.
-    copies: u16,
+    copies: u32,
     /// Compute programs dispatched before this pass.
     compute: Vec<Pass>,
     /// Writes no buffer, only images: draws into `Targets::sink`.
@@ -755,9 +755,9 @@ pub struct PackPost {
     shadow_water: Option<Pass>,
     shadow_comp: Vec<Pass>,
     /// Buffers with mipmaps (filterable ones a program asks them for).
-    mipped: u16,
+    mipped: u32,
     /// Buffers whose mip chain matches their first level, this frame.
-    mips_valid: u16,
+    mips_valid: u32,
     /// The downsampling pipeline of each format with mipmaps.
     down: HashMap<wgpu::TextureFormat, (wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The per-draw uniforms of gbuffers programs.
@@ -778,24 +778,24 @@ pub struct PackPost {
     /// The shared atlas's normal and specular paged maps (`set_paged_maps`).
     paged_maps: [Option<wgpu::TextureView>; 2],
     lightmap: wgpu::TextureView,
-    deferred_pre: u16,
-    composite_pre: u16,
+    deferred_pre: u32,
+    composite_pre: u32,
     formats: [wgpu::TextureFormat; BUFFERS],
     clears: [Option<[f32; 4]>; BUFFERS],
     /// Buffers of a three-channel format, and whether their textures are new: then they get
     /// alpha 1 before the next frame.
-    rgb: u16,
+    rgb: u32,
     rgb_unset: bool,
-    used: u16,
+    used: u32,
     /// Buffers some pass draws into the "alt" side of or flips; the others' B is their A.
-    doubled: u16,
+    doubled: u32,
     /// `size.buffer.*`.
     sizes: [Option<horizon_shaders::BufferSize>; BUFFERS],
     /// Buffers bound as images, and those also copied for a pass that samples them.
-    storage: u16,
-    copied: u16,
+    storage: u32,
+    copied: u32,
     /// Bit n set: B is buffer n's "main".
-    main: u16,
+    main: u32,
     targets: Option<Targets>,
     noise: wgpu::TextureView,
     dummy: wgpu::TextureView,
@@ -1395,15 +1395,15 @@ struct Resources<'a> {
     indices: Option<&'a wgpu::BindGroupLayout>,
     gpu: Gpu,
     /// The buffers whose format can be bound as an image.
-    storable: u16,
+    storable: u32,
     /// The shadowcolor buffers the pack has (bit n: shadowcolor n), and those whose format can
     /// be bound as an image.
-    shadow_colors: u16,
-    shadow_storable: u16,
+    shadow_colors: u32,
+    shadow_storable: u32,
     /// The format a pack image of a format is made in (`Gpu::backing`).
     backing: &'a dyn Fn(wgpu::TextureFormat) -> wgpu::TextureFormat,
     /// The buffers of a three-channel format (`rgb`): they have no alpha to write, and read 1.
-    rgb: u16,
+    rgb: u32,
     /// The bits per channel a buffer of a small packed format keeps ([`packed::bits`]).
     packed: [Option<[u8; 4]>; BUFFERS],
     /// The stage (`texture.<stage>`) of the programs built so far, and the buffers one of them
@@ -1412,7 +1412,7 @@ struct Resources<'a> {
     /// `composite`'s. (Super Duper Vanilla's `texture.composite.colortex0` is its clouds, read
     /// before `composite4` writes bloom there; Bliss's `colortex6` is blue noise until
     /// `composite5` writes it.)
-    released: std::cell::Cell<(&'static str, u16)>,
+    released: std::cell::Cell<(&'static str, u32)>,
     /// The formats and dimensions of the images no `image.*` gives, for their stand-ins.
     stand_ins: &'a std::cell::RefCell<Vec<(wgpu::TextureFormat, wgpu::TextureViewDimension)>>,
     /// Bit n: shadowtex n read through a plain sampler filters linearly (`shadowtexNNearest`
@@ -1609,8 +1609,8 @@ fn bindings(
     Vec<wgpu::BindGroupLayoutEntry>,
     Vec<Binding>,
     HashMap<u32, u32>,
-    u16,
-    u16,
+    u32,
+    u32,
     Vec<(u32, Image)>,
 )> {
     let textures = pack.textures;
@@ -1628,14 +1628,14 @@ fn bindings(
     )];
     let mut samplers = Vec::new();
     let (mut kinds, mut slots) = (HashMap::new(), HashMap::new());
-    let mut reads = 0u16;
-    let mut shadow_reads = 0u16;
+    let mut reads = 0u32;
+    let mut shadow_reads = 0u32;
     let watershadow = interface.samplers.iter().any(|s| s.name == "watershadow");
     // Opaque gbuffers draws cannot sample their own attachments. Translucent draws can
     // read colortex4 and above from the preceding deferred stage; those reads use a copy
     // taken before the draw, so the sampled texture is never also an attachment.
     let in_place = match geometry {
-        Some(_) => buffers.iter().fold(0u16, |m, &b| m | 1 << b),
+        Some(_) => buffers.iter().fold(0u32, |m, &b| m | 1 << b),
         None => 0,
     };
     for s in &interface.samplers {
@@ -2013,7 +2013,7 @@ fn build_pass(
     let index = |name: &str, ty: &str| {
         pack_uniforms::index_in(name, geometry.is_some()).or_else(|| custom_index(custom, name, ty))
     };
-    let mask = |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u16, |m, f| m | 1 << f.0);
+    let mask = |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u32, |m, f| m | 1 << f.0);
     let mut p = p;
     let program = p.program.take()?;
     let interface = &program.interface;
@@ -2121,12 +2121,12 @@ fn build_pass(
         notes.push(format!("{}: writes no buffer; skipped", p.name));
         return None;
     }
-    let written = writes.iter().fold(0u16, |m, w| m | 1 << w.1);
+    let written = writes.iter().fold(0u32, |m, w| m | 1 << w.1);
     let kept = p
         .flips
         .iter()
         .filter(|f| !f.1)
-        .fold(0u16, |m, f| m | 1 << f.0);
+        .fold(0u32, |m, f| m | 1 << f.0);
     // Gbuffers programs write in place (6.1.6). A forced flip of a buffer the program writes
     // cancels the write's own flip, as in Iris 1.11.7 (probed with packs of our own).
     let flip = if final_pass || geometry.is_some() {
@@ -2580,7 +2580,7 @@ impl PackPost {
         // passes leave alpha alone, and its clears and first contents set it to 1.
         let rgb = (0..BUFFERS)
             .filter(|&i| post.config.buffers[i].format.channels == 3)
-            .fold(0u16, |m, i| m | 1 << i);
+            .fold(0u32, |m, i| m | 1 << i);
         // A small packed format's buffer reads back fewer bits, as in Iris: its clears and
         // what its passes write keep only those.
         let packed: [Option<[u8; 4]>; BUFFERS] =
@@ -2612,7 +2612,7 @@ impl PackPost {
             }
         }
         // shadowcolor2 to 7 only for a pack that names `HIGHER_SHADOWCOLOR`.
-        let shadow_colors = (1u16 << post.shadow_colors) - 1;
+        let shadow_colors = (1u32 << post.shadow_colors) - 1;
         let mut custom = post.custom;
         let custom_names: Vec<(String, String)> = (custom.uniforms())
             .map(|(name, ty)| (name.to_owned(), ty.to_owned()))
@@ -2626,11 +2626,11 @@ impl PackPost {
             custom.notes.clear();
         }
         let mask =
-            |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u16, |m, f| m | 1 << f.0);
-        let mut used = 1u16;
+            |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u32, |m, f| m | 1 << f.0);
+        let mut used = 1u32;
         // Buffers some pass draws into the "alt" side of, or flips: only these get a B texture.
         let mut doubled = mask(&post.deferred_pre) | mask(&post.composite_pre);
-        let mut shadow_doubled = 0u16;
+        let mut shadow_doubled = 0u32;
         let draws = DrawUniforms::new(device);
         // The shadow buffers' formats when the shadow pass runs; their programs see them as
         // buffers 0 to 7.
@@ -2645,8 +2645,8 @@ impl PackPost {
                 .filter(|_| i < SHADOW_COLORS)
                 .map_or(formats[i], |f| f[i])
         });
-        let (mut storage, mut copied, mut image_copied, mut snapshotted) = (0u16, 0u16, 0u64, 0u64);
-        let (mut shadow_storage, mut shadow_copied) = (0u16, 0u16);
+        let (mut storage, mut copied, mut image_copied, mut snapshotted) = (0u32, 0u32, 0u64, 0u64);
+        let (mut shadow_storage, mut shadow_copied) = (0u32, 0u32);
         if !gpu.compute {
             notes.push("this GPU has no compute shaders: compute programs are skipped".into());
         }
@@ -2691,7 +2691,7 @@ impl PackPost {
         let buffers = pack_images::Buffers::new(device, objects, minimums, gpu.storage_stages());
         let storable = (0..BUFFERS)
             .filter(|&i| gpu.storable(adapter, formats[i], features))
-            .fold(0u16, |m, i| m | 1 << i);
+            .fold(0u32, |m, i| m | 1 << i);
         let indices = gpu.vertex_storage.then(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Shader pack geometry indices"),
@@ -2721,7 +2721,7 @@ impl PackPost {
             shadow_storable: shadow_formats.map_or(0, |f| {
                 (0..SHADOW_COLORS)
                     .filter(|&n| gpu.storable(adapter, f[n], features))
-                    .fold(0u16, |m, n| m | 1 << n)
+                    .fold(0u32, |m, n| m | 1 << n)
             }),
             rgb,
             packed,
@@ -3336,7 +3336,7 @@ impl PackPost {
             .chain(hand_more.iter().flatten())
         };
         let shadow_targets = shadow_formats.map(|f| {
-            let colors = every_pass().fold(0u16, |m, p| {
+            let colors = every_pass().fold(0u32, |m, p| {
                 let own = if p.group.shadow() {
                     p.reads | p.written | p.flip
                 } else {
@@ -3374,7 +3374,7 @@ impl PackPost {
         // alternate image, so their first write does not replace the main image's clear.
         let mut cleared = Vec::new();
         for b in 1..BUFFERS {
-            let bit = 1u16 << b;
+            let bit = 1u32 << b;
             let touched = |p: &&Pass| (p.reads | p.flip | p.written) & bit != 0;
             // Gbuffers passes cover part of their targets: a clear is needed if they touch it.
             let first = sky
@@ -3513,10 +3513,10 @@ impl PackPost {
             formats[b].sample_type(None, Some(device.features()))
                 == Some(wgpu::TextureSampleType::Float { filterable: true })
         };
-        let asked = passes.iter().fold(0u16, |m, p| m | p.mipmaps);
+        let asked = passes.iter().fold(0u32, |m, p| m | p.mipmaps);
         let mipped = (0..BUFFERS)
             .filter(|&b| asked & 1 << b != 0 && filterable(b))
-            .fold(0u16, |m, b| m | 1 << b);
+            .fold(0u32, |m, b| m | 1 << b);
         if asked & !mipped != 0 {
             notes.push(format!(
                 "mipmaps of unfilterable buffers are not generated (buffers {:#b})",
@@ -3892,9 +3892,9 @@ impl PackPost {
         } else {
             (self.main, self.mips_valid & self.mipped & pass.reads)
         };
-        let key = u64::from(main & pass.reads)
-            | u64::from(current) << 16
-            | u64::from(shadow_main & pass.shadow_reads) << 32;
+        let key = u128::from(main & pass.reads)
+            | u128::from(current) << 32
+            | u128::from(shadow_main & pass.shadow_reads) << 64;
         let group = pass.groups.entry(key).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupEntry {
                 binding: 0,
@@ -3911,7 +3911,7 @@ impl PackPost {
                         shadow_color(i, usize::from(key & 1 << i != 0)).unwrap_or(&self.dummy)
                     }
                     Source::ShadowColor(i) => {
-                        shadow_color(i, usize::from(key & 1 << (32 + i) != 0))
+                        shadow_color(i, usize::from(key & 1 << (64 + i) != 0))
                             .unwrap_or(&self.dummy)
                     }
                     Source::ShadowDepth(i, _) => match shadow {
@@ -4042,7 +4042,7 @@ impl PackPost {
                     Image::Color(i) if shadow_space => {
                         shadow_color(i, usize::from(key & 1 << i != 0)).unwrap_or(&self.dummy)
                     }
-                    Image::ShadowColor(i) => shadow_color(i, usize::from(key & 1 << (32 + i) != 0))
+                    Image::ShadowColor(i) => shadow_color(i, usize::from(key & 1 << (64 + i) != 0))
                         .unwrap_or(&self.dummy),
                     Image::Color(i) => {
                         let side = usize::from(key & 1 << i != 0);
@@ -5652,8 +5652,8 @@ impl PackPost {
             }
         }
         self.main = 0;
-        let main = |m: u16, i: usize| usize::from(m & 1 << i != 0);
-        let view = |m: u16, i: usize, alt: bool| {
+        let main = |m: u32, i: usize| usize::from(m & 1 << i != 0);
+        let view = |m: u32, i: usize, alt: bool| {
             targets.color[i]
                 .as_ref()
                 .map(|t| &t[main(m, i) ^ usize::from(alt)])
@@ -5966,7 +5966,7 @@ impl PackPost {
         if let Some(center) = &mut self.center_depth {
             center.copy(device, encoder, &targets.depth_texture);
         }
-        let view = |m: u16, i: usize, alt: bool| {
+        let view = |m: u32, i: usize, alt: bool| {
             targets.color[i]
                 .as_ref()
                 .map(|t| &t[main(m, i) ^ usize::from(alt)])

@@ -43,7 +43,7 @@ pub(super) struct ShadowTargets {
     /// The clear colour of each buffer cleared every frame.
     pub clears: [Option<[f32; 4]>; SHADOW_COLORS],
     /// Bit n set: B is shadowcolor n's "main".
-    pub main: u16,
+    pub main: u32,
     /// Nothing cleared yet this frame: the first pass into the shadow buffers clears them as it
     /// begins (`clear_ops`), which saves a pass that loads and stores them all on tiled GPUs.
     fresh: bool,
@@ -141,9 +141,9 @@ impl ShadowTargets {
         device: &wgpu::Device,
         shadow: &horizon_shaders::Shadow,
         formats: [wgpu::TextureFormat; SHADOW_COLORS],
-        colors: u16,
-        doubled: u16,
-        images: (u16, u16),
+        colors: u32,
+        doubled: u32,
+        images: (u32, u32),
         depth1: bool,
     ) -> Self {
         let size = shadow

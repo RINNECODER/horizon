@@ -13,7 +13,7 @@
 use crate::Preprocessed;
 
 /// colortex buffers (6.1.1).
-pub const BUFFERS: usize = 16;
+pub const BUFFERS: usize = 32;
 
 /// The shadowcolor buffers there are: two, and `shadowcolor2` to `shadowcolor7` for a pack that
 /// names the `HIGHER_SHADOWCOLOR` feature.
