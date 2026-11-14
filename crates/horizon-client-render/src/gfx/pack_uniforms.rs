@@ -957,7 +957,7 @@ impl FrameUniforms {
                 "near" => Value::f(&[0.05]),
                 // The chunk render distance, not the distant terrain's reach.
                 "far" => Value::f(&[frame.detail_distance]),
-                // Distant terrain shares the main depth buffer and projection (`index_in`).
+                // Distant terrain shares the main projection (`index_in`), with a depth buffer of its own.
                 "dhFarPlane" => Value::f(&[frame.depth_far]),
                 "dhRenderDistance" => Value::i(&[frame.distance as i32]),
                 "rainStrength" => Value::f(&[inputs.rain]),
@@ -1179,8 +1179,8 @@ pub fn index_in(name: &str, geometry: bool) -> Option<usize> {
         "fogMode" if geometry => index(GBUFFERS_FOG_MODE),
         "fogShape" if geometry => index(GBUFFERS_FOG_SHAPE),
         "centerDepthSmooth" if geometry => index(GBUFFERS_CENTER_DEPTH),
-        // shortcut: distant tiles are drawn into depthtex with gbufferProjection, so DH's projection
-        // and near plane are those; a DH-only depth buffer with its own planes would need its own draws.
+        // shortcut: distant tiles are drawn with gbufferProjection (into dhDepthTex), so DH's projection
+        // and near plane are those; DH's own planes would need a projection of their own.
         "dhProjection" => index("gbufferProjection"),
         "dhProjectionInverse" => index("gbufferProjectionInverse"),
         "dhPreviousProjection" => index("gbufferPreviousProjection"),
