@@ -753,6 +753,8 @@ pub struct PackPost {
     /// The water patches' depth holds patches (or was never cleared): cleared before the next
     /// frame's are drawn.
     water_mask_dirty: bool,
+    /// MetalFX Spatial for `final`'s picture (`metalfx.rs`), set by the renderer each frame.
+    pub(super) metalfx: Option<super::metalfx::MetalFx>,
     /// The shadow buffers, when the shadow pass runs (2.5), and the `shadowcomp` programs.
     shadow_targets: Option<super::pack_shadow::ShadowTargets>,
     /// What draws terrain from the light (`shadow`), and translucent terrain (`shadow_water`).
@@ -3754,6 +3756,7 @@ impl PackPost {
             depth2,
             water_mask,
             water_mask_dirty: true,
+            metalfx: None,
             shadow_targets,
             shadow_terrain,
             shadow_cutout,
@@ -6276,7 +6279,13 @@ impl PackPost {
             rp.set_bind_group(0, &group, &[]);
             rp.draw(0..3, 0..1);
         } else if let Some(picture) = &final_view {
-            // The picture at the world's size onto the window: one upscale, smoothly.
+            // The picture at the world's size onto the window: one upscale, smoothly, or
+            // MetalFX Spatial's (then this copies its window-sized picture).
+            let upscaled = self
+                .metalfx
+                .as_mut()
+                .and_then(|m| m.spatial(queue, encoder, picture, size, window));
+            let picture = upscaled.as_ref().unwrap_or(picture);
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shader pack final"),
                 layout: &self.upscale.1,

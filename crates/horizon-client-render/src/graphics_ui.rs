@@ -9,7 +9,7 @@ use crate::{
     graphics::{
         EntityCullingMode, FarDetail, FrameGeneration, GpuCullingMode, GraphicsApi, HdrMode,
         HdrSetup as Setup, LeafCullingMode, Overlay, Pacing, ParallelTickMode, ParticleCullingMode,
-        PresentMode, Preset, Upscaling,
+        PresentMode, Preset, Upscaler, Upscaling,
     },
     graphics_style::Cost,
     lang,
@@ -106,6 +106,7 @@ pub enum H {
     Antialiasing,
     Upscaling,
     UpscalingSharpness,
+    Upscaler,
     ScreenshotQuality,
     FrameGeneration,
     Hdr,
@@ -393,6 +394,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             H::UpscalingSharpness,
                             Low,
                             "Sharpens the upscaled picture. Higher: crisper edges, more shimmer.",
+                        ),
+                        h(
+                            H::Upscaler,
+                            High,
+                            "What rebuilds the smaller picture. MetalFX: Apple's upscalers; Temporal is sharpest.",
                         ),
                         h(
                             H::ScreenshotQuality,
@@ -952,6 +958,7 @@ impl H {
             H::ScreenshotQuality => {
                 labelled("Screenshot Quality", format!("{}x", g.screenshot_quality))
             }
+            H::Upscaler => labelled("Upscaler", g.upscaler.label()),
             H::FrameGeneration => labelled("Frame Generation", g.frame_generation.label()),
             H::Hdr => labelled("HDR", g.hdr.label()),
             H::HdrCalibrate => Text::literal(lang::get(match setup(s, out) {
@@ -1090,6 +1097,13 @@ impl H {
                     g.screenshot_quality,
                     back,
                 )
+            }
+            // Temporal needs TAA's jitter: picking it turns TAA on.
+            H::Upscaler => {
+                g.upscaler = step(Upscaler::ALL, g.upscaler, back);
+                if g.upscaler == Upscaler::MetalFxTemporal {
+                    (g.fxaa, g.taa) = (false, true);
+                }
             }
             H::FrameGeneration => {
                 g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
@@ -1353,6 +1367,7 @@ impl Item {
 fn shown(item: Item, s: &Settings) -> bool {
     match item {
         Item::Horizon(H::Upscaling) => s.horizon.taa,
+        Item::Horizon(H::Upscaler) => Upscaler::ALL.len() > 1,
         Item::Extra(crate::extras::Item::Fullbright) => !s.fullbright_held,
         _ => true,
     }

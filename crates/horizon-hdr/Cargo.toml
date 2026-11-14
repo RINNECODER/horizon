@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "HDR metadata for the swapchain: the Vulkan calls the crates that forbid unsafe code can't make"
+description = "HDR metadata for the swapchain and MetalFX upscaling: the Vulkan and Metal calls the crates that forbid unsafe code can't make"
 
 [dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
@@ -12,6 +12,14 @@ wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # The version wgpu-hal already uses.
 ash = { version = "0.38", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
+# MetalFX (src/metalfx.rs); the objc2-metal wgpu-hal is built on.
+log = "0.4"
+objc2 = "0.6"
+objc2-metal = "0.3.2"
+objc2-metal-fx = "0.3.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The versions winit already uses, with the color-management protocol (staging).

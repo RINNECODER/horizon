@@ -197,3 +197,19 @@ fn clip_box(c: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
     // The alpha carries the emissive mark through to HDR output (hdr.wgsl).
     return vec4(mix(past, centre.rgb, share), centre.a);
 }
+
+// MetalFX Temporal's motion vectors (`gfx/metalfx.rs`), at the world's size: where each
+// pixel's point was last frame minus where it is, in UV, through its depth and the
+// camera's motion (TAA's `reproject`). What moves on its own reads as still, as in TAA.
+@fragment fn fs_motion(in: PostOut) -> @location(0) vec4<f32> {
+    let last = vec2<i32>(textureDimensions(depth)) - 1;
+    let p = clamp(vec2<i32>(floor(in.clip.xy)), vec2(0), last);
+    let ndc = vec2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let previous = taa.reproject * vec4(ndc, textureLoad(depth, p, 0).r, 1.0);
+    // A point at the far plane's infinity has no finite last position: no motion.
+    if previous.w <= 1e-6 {
+        return vec4(0.0);
+    }
+    let uv = vec2(0.5, -0.5) * previous.xy / previous.w + 0.5;
+    return vec4(uv - in.uv, 0.0, 0.0);
+}

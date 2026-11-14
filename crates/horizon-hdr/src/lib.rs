@@ -6,6 +6,9 @@
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
+#[cfg(target_os = "macos")]
+pub mod metalfx;
+
 /// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
 /// it, so [`set_metadata`] can tell the compositor the real peak brightness.
 /// `None` leaves opening to wgpu.

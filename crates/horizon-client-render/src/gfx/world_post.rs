@@ -48,6 +48,24 @@ struct TaaResources {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
+    /// MetalFX Temporal's motion vectors (`fs_motion`) from TAA's bindings.
+    #[cfg(target_os = "macos")]
+    motion: wgpu::RenderPipeline,
+}
+
+impl TaaResources {
+    fn write_uniform(&self, queue: &wgpu::Queue, frame: &UpscaleFrame<'_>) {
+        let uniform = TaaUniform {
+            reproject: frame.reproject,
+            jitter: [
+                frame.jitter_clip[0],
+                frame.jitter_clip[1],
+                if frame.reset { 1.0 } else { 0.0 },
+                0.0,
+            ],
+        };
+        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+    }
 }
 
 /// One frame handed to an upscaler backend: the jittered world at `render_size` and what
@@ -109,16 +127,7 @@ impl UpscalerBackend for TaaResources {
     ) -> &'t wgpu::BindGroup {
         // The resolve bind group already samples `frame.color` and `frame.depth`.
         let i = (frame.index % 2) as usize;
-        let uniform = TaaUniform {
-            reproject: frame.reproject,
-            jitter: [
-                frame.jitter_clip[0],
-                frame.jitter_clip[1],
-                if frame.reset { 1.0 } else { 0.0 },
-                0.0,
-            ],
-        };
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        self.write_uniform(queue, frame);
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: &taa.history[i],
             resolve_target: None,
@@ -172,6 +181,8 @@ pub struct Post {
     taa_previous: Option<(DMat4, DVec3)>,
     taa_this_frame: TaaUniform,
     light_key: Option<(bool, [f32; 4], [f32; 4], [[f32; 4]; 2])>,
+    /// The Upscaler setting's MetalFX, for the world and a shader pack's `final`.
+    pub(super) metalfx: super::metalfx::MetalFx,
 }
 
 impl Post {
@@ -304,6 +315,32 @@ impl Post {
                 multiview_mask: None,
                 cache: None,
             });
+            #[cfg(target_os = "macos")]
+            let motion = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("MetalFX motion"),
+                layout: Some(&taa_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_post"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_motion"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
             let internal = pollster::block_on(internal.pop());
             match internal.or(pollster::block_on(validation.pop())) {
                 None => {
@@ -317,6 +354,8 @@ impl Post {
                         layout: taa_layout,
                         pipeline: taa_pipeline,
                         uniform,
+                        #[cfg(target_os = "macos")]
+                        motion,
                     })
                 }
                 Some(e) => {
@@ -352,6 +391,7 @@ impl Post {
             taa_previous: None,
             taa_this_frame: bytemuck::Zeroable::zeroed(),
             light_key: None,
+            metalfx: super::metalfx::MetalFx::new(device),
         }
     }
 
@@ -638,9 +678,10 @@ impl Post {
         })
     }
 
-    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on.
+    /// Draw the scaled world onto `screen`, through TAA (or MetalFX) when this frame's
+    /// `jitter` had it on.
     pub fn finish(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
@@ -648,6 +689,18 @@ impl Post {
     ) {
         let Some(target) = &self.target else { return };
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
+            let window = screen.texture().size();
+            if let Some(view) = self.metalfx.spatial(
+                queue,
+                encoder,
+                &target.color,
+                target.size,
+                [window.width, window.height],
+            ) {
+                let group = self.bind(self.metalfx.device(), &view);
+                self.draw_onto(encoder, screen, &group, &self.copy, timing);
+                return;
+            }
             self.finish_with(encoder, screen, &target.group, timing.as_deref_mut());
             return;
         };
@@ -667,6 +720,34 @@ impl Post {
             reset: self.taa_this_frame.jitter[2] > 0.5,
             index: self.taa_frame,
         };
+        #[cfg(target_os = "macos")]
+        {
+            let group = &taa.resolve[(frame.index % 2) as usize];
+            let motion = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView| {
+                res.write_uniform(queue, &frame);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("MetalFX motion"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&res.motion);
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            };
+            if let Some(view) = self.metalfx.temporal(queue, encoder, &frame, motion) {
+                let group = self.bind(self.metalfx.device(), &view);
+                self.draw_onto(encoder, screen, &group, &self.copy, timing);
+                return;
+            }
+        }
         let shown = res.resolve(queue, encoder, &frame, taa, timing.as_deref_mut());
         let pipeline = if self.upscale > 1.0 {
             &self.sharpen
