@@ -108,6 +108,10 @@ enum Source {
     Depth1,
     /// `depthtex2`: depth without translucent terrain and without the first-person hand.
     Depth2,
+    /// `dhDepthTex0`/`dhDepthTex1`: the far tiles' own depth, with and without `dh_water`
+    /// (Iris with DH keeps it apart from `depthtex*`). Without `dh_*` programs, `depthtex*`.
+    DhDepth,
+    DhDepth1,
     Noise,
     /// A 1×1 stand-in for names this slice does not provide yet.
     Dummy,
@@ -173,6 +177,8 @@ impl SamplerKind {
             Source::Depth
             | Source::Depth1
             | Source::Depth2
+            | Source::DhDepth
+            | Source::DhDepth1
             | Source::ShadowDepth(_, false)
             | Source::WaterMask => Self::Nearest,
             Source::Noise => Self::Repeat,
@@ -593,6 +599,9 @@ struct Targets {
     depth1: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// `depthtex2`, when a program after the hand reads it without the hand.
     depth2: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// With `dh_terrain` or `dh_water`: the far tiles' depth (`dhDepthTex0`), which they draw into
+    /// instead of `depth`, and its copy before `dh_water` (`dhDepthTex1`).
+    dh_depth: Option<[(wgpu::Texture, wgpu::TextureView); 2]>,
     /// The boats' water patches' depth, when translucent terrain reads it (`Source::WaterMask`).
     water_mask: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Both sides' mip chains of the buffers with mipmaps (`color` is their first level).
@@ -1001,9 +1010,10 @@ fn source(name: &str, shadow_space: bool, shadow_pass: bool, watershadow: bool) 
         return Source::Dummy;
     }
     match name {
-        // Distant tiles are in depthtex itself (`pack_uniforms::index_in`'s DH note).
-        "depthtex0" | "gdepthtex" | "dhDepthTex0" | "dhDepthTex" => Source::Depth,
-        "depthtex1" | "dhDepthTex1" => Source::Depth1,
+        "depthtex0" | "gdepthtex" => Source::Depth,
+        "depthtex1" => Source::Depth1,
+        "dhDepthTex0" | "dhDepthTex" => Source::DhDepth,
+        "dhDepthTex1" => Source::DhDepth1,
         "depthtex2" => Source::Depth2,
         "noisetex" => Source::Noise,
         "texture" | "gtexture" | "tex" => Source::Atlas,
@@ -1407,6 +1417,15 @@ pub(super) struct BlockIds {
     /// With the atlas, the far tiles' programs' bindings: it, its sampler and the near chunk
     /// columns (`PackPost::set_near_columns`).
     atlas: Option<(wgpu::TextureView, wgpu::Sampler, wgpu::Buffer)>,
+}
+
+/// Which of the far tiles' solid, translucent and shadow draws are kept apart from the near
+/// terrain's, given which of `dh_terrain`, `dh_water` and `dh_shadow` the pack has. Iris draws
+/// distant terrain only through `dh_*` programs, so a pack without them never sees the tiles
+/// (Ray's per-vertex voxel lighting over them blacked out the frame).
+pub(super) fn far_split([terrain, water, shadow]: [bool; 3]) -> [bool; 3] {
+    let none = !terrain && !water;
+    [terrain || none, water || none, shadow]
 }
 
 /// The near chunk columns' bit grid the far tiles' programs read (`pack_atlas::NEAR_COLUMNS`):
@@ -1861,9 +1880,9 @@ fn bindings(
                     // The shadow pass writes the shadow map.
                     Source::ShadowDepth(..) => group == Group::Shadow,
                     Source::Atlas => geometry.is_none(),
-                    Source::Depth => geometry.is_some(),
+                    Source::Depth | Source::DhDepth => geometry.is_some(),
                     // Translucent terrain reads the copy; opaque terrain would read itself.
-                    Source::Depth1 | Source::Depth2 => group == Group::Gbuffers,
+                    Source::Depth1 | Source::Depth2 | Source::DhDepth1 => group == Group::Gbuffers,
                     Source::Color(n) => {
                         (group != Group::Translucent || n < 4) && in_place & 1 << n != 0
                     }
@@ -1879,6 +1898,8 @@ fn bindings(
                     Source::Depth
                     | Source::Depth1
                     | Source::Depth2
+                    | Source::DhDepth
+                    | Source::DhDepth1
                     | Source::ShadowDepth(..)
                     | Source::WaterMask => wgpu::TextureSampleType::Float { filterable: false },
                     // Unfilterable on WebGPU-level devices; the lightmap is sampled at texel centres.
@@ -3438,8 +3459,11 @@ impl PackPost {
         };
         let reads_depth2 = reads_depth(Source::Depth2);
         // Without a shader hand, depth1 also serves depth2: both exclude only translucency.
+        // Without dh_* programs, dhDepthTex1 is depthtex1 (`Targets::dh_depth`).
+        let dh_reads_depth1 =
+            dh_terrain.is_none() && dh_water.is_none() && reads_depth(Source::DhDepth1);
         let depth1 = (water.is_some() || hand.is_some())
-            && (reads_depth(Source::Depth1) || (hand.is_none() && reads_depth2));
+            && (reads_depth(Source::Depth1) || dh_reads_depth1 || (hand.is_none() && reads_depth2));
         let depth2 = hand.is_some() && reads_depth2;
         let water_mask = (water.iter())
             .flat_map(|p| &p.samplers)
@@ -3545,7 +3569,14 @@ impl PackPost {
                 .flat_map(|p| std::iter::once(p).chain(&p.compute))
                 .any(|p| {
                     p.samplers.iter().any(|s| {
-                        matches!(s.source, Source::Depth | Source::Depth1 | Source::Depth2)
+                        matches!(
+                            s.source,
+                            Source::Depth
+                                | Source::Depth1
+                                | Source::Depth2
+                                | Source::DhDepth
+                                | Source::DhDepth1
+                        )
                     })
                 });
         // Buffers of a size of their own clear apart from the blit, which writes colortex0.
@@ -4040,7 +4071,15 @@ impl PackPost {
             let shadow_color =
                 |i: usize, side: usize| shadow.and_then(|t| t.color[i].as_ref()).map(|c| &c[side]);
             for s in &pass.samplers {
-                let texture = match s.source {
+                // Without dh_* programs the far tiles are in depthtex itself.
+                let source = match (s.source, &targets.dh_depth) {
+                    (Source::DhDepth, None) => Source::Depth,
+                    (Source::DhDepth1, None) => Source::Depth1,
+                    (source, _) => source,
+                };
+                let texture = match source {
+                    Source::DhDepth => targets.dh_depth.as_ref().map_or(&self.dummy, |d| &d[0].1),
+                    Source::DhDepth1 => targets.dh_depth.as_ref().map_or(&self.dummy, |d| &d[1].1),
                     Source::Color(i) if shadow_space && pass.copies & 1 << i != 0 => shadow
                         .and_then(|t| t.scratch[i].as_ref())
                         .unwrap_or(&self.dummy),
@@ -4316,7 +4355,11 @@ impl PackPost {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: match &targets.water_mask {
                     Some((_, view)) if water_mask => view,
-                    _ => shadow.map_or(&targets.depth, |s| &s.depth.1),
+                    _ => match (shadow, &targets.dh_depth) {
+                        (Some(s), _) => &s.depth.1,
+                        (None, Some(d)) if pass.name.starts_with("dh_") => &d[0].1,
+                        (None, _) => &targets.depth,
+                    },
                 },
                 depth_ops: Some(depth_ops),
                 stencil_ops: None,
@@ -4347,6 +4390,17 @@ impl PackPost {
         };
         if let Some(far) = far {
             self.draw_terrain_part(device, queue, encoder, size, far, false, draw);
+        }
+        // dhDepthTex1: the far tiles' depth before dh_water.
+        if matches!(list, TerrainList::Solid)
+            && let Some([(depth, _), (copy, _)]) =
+                self.targets.as_ref().and_then(|t| t.dh_depth.as_ref())
+        {
+            encoder.copy_texture_to_texture(
+                depth.as_image_copy(),
+                copy.as_image_copy(),
+                depth.size(),
+            );
         }
         self.draw_terrain_part(device, queue, encoder, size, list, false, draw);
         // Solid terrain's cutout part; in the shadow pass only with `shadow_cutout`.
@@ -5402,6 +5456,18 @@ impl PackPost {
             let view = t.create_view(&Default::default());
             (t, view)
         });
+        let dh_depth = (self.dh_terrain.is_some() || self.dh_water.is_some()).then(|| {
+            let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+            [
+                ("dhDepthTex0", usage),
+                ("dhDepthTex1", wgpu::TextureUsages::COPY_DST),
+            ]
+            .map(|(label, usage)| {
+                let t = texture(label, depth32, usage);
+                let view = t.create_view(&Default::default());
+                (t, view)
+            })
+        });
         let depth2 = self.depth2.then(|| {
             let t = texture("depthtex2", depth32, wgpu::TextureUsages::COPY_DST);
             let view = t.create_view(&Default::default());
@@ -5451,6 +5517,7 @@ impl PackPost {
             depth_texture,
             depth1,
             depth2,
+            dh_depth,
             water_mask,
             mips,
         });
@@ -5949,6 +6016,20 @@ impl PackPost {
                 label: Some("Shader pack clear"),
                 color_attachments: &attachments,
                 timestamp_writes: self.timing.as_mut().and_then(|t| t.writes("clear")),
+                ..Default::default()
+            });
+        }
+        if let Some(d) = &targets.dh_depth {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shader pack far tiles' depth clear"),
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &d[0].1,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
         }
@@ -6962,6 +7043,15 @@ mod tests {
         assert!(!fits("sampler2D", T::Uint));
         assert!(!fits("isampler2D", float));
         assert!(!fits("sampler2DShadow", float));
+    }
+
+    #[test]
+    fn far_tiles_reach_only_dh_programs() {
+        // No dh_*: the tiles are left out of gbuffers_terrain and gbuffers_water.
+        assert_eq!(far_split([false; 3]), [true, true, false]);
+        // dh_terrain alone: far water stays with gbuffers_water.
+        assert_eq!(far_split([true, false, false]), [true, false, false]);
+        assert_eq!(far_split([true, true, true]), [true; 3]);
     }
 
     #[test]

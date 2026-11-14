@@ -8411,12 +8411,13 @@ impl Renderer {
             });
         // The far tiles' solid, translucent and shadow draws, kept apart for the pack's dh_terrain,
         // dh_water and dh_shadow, so neither they nor the near programs go over the other's vertices.
-        let far_split = self
+        let far_programs = self
             .pack_post
             .as_ref()
             .and_then(|p| p.1.as_ref())
             .filter(|_| pack_terrain)
-            .map_or([false; 3], |p| p.far_programs());
+            .map(|p| p.far_programs());
+        let far_split = far_programs.map_or([false; 3], pack_post::far_split);
         // `LevelRenderer.extractSectionDrawGroups`' fade-in time, for the instances.
         let fade_ms = fade_millis(frame.chunk_fade);
         // GPU culling's fading sections, decided at `fades.now`: before the gate, the record
@@ -8444,7 +8445,7 @@ impl Renderer {
         // The columns near terrain draws, for the far tiles' programs to leave out: resident, and
         // within the render distance or kept past it where the tiles leave them out (`lod_cutout`,
         // the walk's `beyond`).
-        if far_split.contains(&true)
+        if far_programs.is_some_and(|p| p.contains(&true))
             && let Some(post) = self.pack_post.as_ref().and_then(|p| p.1.as_ref())
         {
             let from = pack_terrain_camera(camera);

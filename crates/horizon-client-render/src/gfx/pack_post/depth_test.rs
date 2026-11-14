@@ -931,3 +931,125 @@ fn sky_covers_the_horizon_without_writing_depth_or_overpainting_terrain() {
         "foreground colour and depth survive sky",
     );
 }
+
+/// Iris with DH keeps the far tiles' depth apart (public DH/Iris shader docs): `depthtex0` holds
+/// only near terrain, `dhDepthTex0` the far tiles with their water, `dhDepthTex1` without it.
+#[test]
+fn far_tiles_have_a_depth_of_their_own() {
+    let Some(gpu) = Gpu::new() else {
+        eprintln!("DEPTH_FIXTURE_NO_ADAPTER");
+        return;
+    };
+    let color = gpu.texture(T::Rgba8Unorm);
+    let depth = gpu.texture(T::Depth32Float);
+    // An empty world: reverse-Z 0 is GL window depth 1.
+    gpu.clear(&color, &depth, 0.0);
+    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0=>Float32x3];
+    let layouts = [Some(wgpu::VertexBufferLayout {
+        array_stride: 12,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRS,
+    })];
+    let mut files = vec![
+        ("final.vsh".to_string(), VERTEX.to_string()),
+        (
+            "final.fsh".into(),
+            "#version 120\nuniform sampler2D depthtex0;uniform sampler2D dhDepthTex0;uniform sampler2D dhDepthTex1;varying vec2 uv;void main(){gl_FragColor=vec4(texture2D(depthtex0,uv).r,texture2D(dhDepthTex0,uv).r,texture2D(dhDepthTex1,uv).r,1.0);}".into(),
+        ),
+    ];
+    // GL window depths: near terrain 0.7, far tiles 0.5, far water 0.4 (in front of both).
+    for (name, clip) in [
+        ("gbuffers_terrain", 0.4),
+        ("dh_terrain", 0.0),
+        ("dh_water", -0.2),
+    ] {
+        files.push((
+            format!("{name}.vsh"),
+            format!("#version 120\nvoid main(){{gl_Position=vec4(gl_Vertex.xy,{clip},1.0);}}"),
+        ));
+        files.push((
+            format!("{name}.fsh"),
+            "#version 120\n/* DRAWBUFFERS:0 */\nvoid main(){gl_FragData[0]=vec4(0.0,0.0,0.0,1.0);}"
+                .into(),
+        ));
+    }
+    let gbuffers = || {
+        horizon_shaders::GbuffersInputs {
+        declarations: "layout(location=0)in vec3 fixture_position;\n".into(),
+        body: "hz_Vertex=vec4(fixture_position,1.0);hz_Color=vec4(1.0);hz_MultiTexCoord0=vec4(0.0);hz_MultiTexCoord1=vec4(240.0);hz_MultiTexCoord2=vec4(240.0);hz_Normal=vec3(0.0,0.0,1.0);\n".into(),
+        attributes: vec![],
+        after: String::new(),
+        alpha_test: None,
+        parts: None,
+        item_id_declared: false,
+        far_depth: false,
+        paged_maps: false,
+        water_mask: false,
+        water_patches: false,
+    }
+    };
+    let inputs = horizon_shaders::GameInputs {
+        terrain: Some(gbuffers()),
+        far_terrain: Some(gbuffers()),
+        ..Default::default()
+    };
+    let mut post = gpu.load(
+        files,
+        World {
+            atlas: None,
+            material_maps: None,
+            lightmap: color.clone(),
+            terrain: Some(Geometry {
+                buffers: &layouts,
+                table: None,
+                depth_write: true,
+                depth_equal: false,
+                atlas: None,
+                material_maps: false,
+                ids: None,
+                cull: false,
+            }),
+            block_ids: &[],
+            sprite_rects: &[],
+            celestial: None,
+            gui_size: SIZE,
+            clouds: None,
+            glint: None,
+            weather: false,
+            hand: false,
+        },
+        inputs,
+    );
+    assert!(
+        post.dh_terrain.is_some() && post.dh_water.is_some(),
+        "{:?}",
+        post.notes
+    );
+    let positions: [[f32; 3]; 6] = [
+        [-1., -1., 0.],
+        [1., -1., 0.],
+        [1., 1., 0.],
+        [-1., -1., 0.],
+        [1., 1., 0.],
+        [-1., 1., 0.],
+    ];
+    let vertices = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Far tiles fixture geometry"),
+            contents: bytemuck::cast_slice(&positions),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+    let hud = HudBatch::new(SIZE);
+    let frame = fixture_frame(&hud);
+    let actual = gpu.render(&mut post, &color, &depth, &frame, &mut |rp, list, _, _| {
+        if matches!(
+            list,
+            TerrainList::Solid | TerrainList::FarSolid | TerrainList::FarTranslucent
+        ) {
+            rp.set_vertex_buffer(0, vertices.slice(..));
+            rp.draw(0..6, 0..1);
+        }
+    });
+    all_pixels(&actual, [179, 102, 128, 255], "far tiles' depth");
+}
