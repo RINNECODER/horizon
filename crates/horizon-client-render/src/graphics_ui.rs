@@ -1022,9 +1022,7 @@ impl H {
         }
         let g = &mut s.horizon;
         match self {
-            H::FarDetail => {
-                g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
-            }
+            H::FarDetail => g.far_detail = step(&FarDetail::ALL, g.far_detail, back),
             H::BlueMapAutoDetect => g.blue_map.auto_detect = !g.blue_map.auto_detect,
             H::BlueMapRadius => {
                 g.blue_map.radius = step(&BLUE_MAP_RADII, g.blue_map.radius_chunks(), back)

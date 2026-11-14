@@ -355,25 +355,53 @@ pub enum FarDetail {
     /// Coarser levels start at half that distance: about a quarter of the
     /// far quads, for GPUs that far terrain slows down. Changes the picture.
     Reduced,
+    /// Distant Horizons' "High" falloff: a level-L tile splits while closer
+    /// than 256 * 2.2^L blocks (Full is 128 * 2^L, DH's "Low"). Cells 2-3x
+    /// finer at mid distance, about five times the far tiles.
+    High,
+    /// Distant Horizons' "Extreme" falloff: 320 * 2.2^L blocks.
+    Extreme,
 }
 impl FarDetail {
+    pub const ALL: [FarDetail; 4] = [
+        FarDetail::Reduced,
+        FarDetail::Full,
+        FarDetail::High,
+        FarDetail::Extreme,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             FarDetail::Full => "full",
             FarDetail::Reduced => "reduced",
+            FarDetail::High => "high",
+            FarDetail::Extreme => "extreme",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             FarDetail::Full => "Full",
             FarDetail::Reduced => "Reduced",
+            FarDetail::High => "High",
+            FarDetail::Extreme => "Extreme",
         }
     }
     fn parse(s: &str) -> Self {
-        if s == "reduced" {
-            FarDetail::Reduced
-        } else {
-            FarDetail::Full
+        Self::ALL
+            .into_iter()
+            .find(|d| d.name() == s)
+            .unwrap_or(FarDetail::Full)
+    }
+    /// How near (in blocks) a far tile of `level` must be to split into
+    /// finer ones.
+    pub(crate) fn split_distance(self, level: u8) -> i64 {
+        let size = 16i64 << level;
+        // Distant Horizons' rule: detail = log_base(distance / unit).
+        let dh = |unit: f64| (unit * 2.2f64.powi(i32::from(level))) as i64;
+        match self {
+            FarDetail::Full => size * 8,
+            FarDetail::Reduced => size * 4,
+            FarDetail::High => dh(256.0),
+            FarDetail::Extreme => dh(320.0),
         }
     }
 }
@@ -1878,6 +1906,10 @@ mod tests {
         assert_eq!(
             Graphics::parse("farDetail:reduced\n").far_detail,
             FarDetail::Reduced
+        );
+        assert_eq!(
+            Graphics::parse("farDetail:high\n").far_detail,
+            FarDetail::High
         );
         for text in ["farDetail:full\n", "farDetail:other\n", ""] {
             assert_eq!(Graphics::parse(text).far_detail, FarDetail::Full);

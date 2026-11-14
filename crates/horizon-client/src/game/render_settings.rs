@@ -183,16 +183,15 @@ impl Game<'_> {
         }
     }
 
-    /// LOD Distance and Far Detail Reduced as the player chose them, the
-    /// distance no farther than a server sampling far terrain for us allows.
-    pub(super) fn far_terrain_choice(&self) -> (u32, bool) {
+    /// LOD Distance and Far Detail as the player chose them, the distance no
+    /// farther than a server sampling far terrain for us allows.
+    pub(super) fn far_terrain_choice(&self) -> (u32, horizon_client::graphics::FarDetail) {
         let g = &self.settings.horizon;
-        let reduced = g.far_detail == horizon_client::graphics::FarDetail::Reduced;
         let distance = match self.server_far_terrain() {
             Some(offer) => g.lod_distance.min(offer.distance),
             None => g.lod_distance,
         };
-        (distance, reduced)
+        (distance, g.far_detail)
     }
     /// The far terrain another machine's server samples for us
     /// (`lod_net`): a client of a dedicated server or of a LAN world, not of
