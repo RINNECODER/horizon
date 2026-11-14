@@ -1000,6 +1000,13 @@ mod tests {
         for (a, b) in ours.iter().zip(&pack) {
             assert!((a - b).abs() < 1e-4, "{a} against {b}");
         }
+        // The pack's hand (window depth 0.5, MC_HAND_DEPTH's range) moves with the view.
+        let hand = texture(
+            vec![0.5; (size[0] * size[1]) as usize],
+            wgpu::TextureFormat::R32Float,
+            4,
+        );
+        assert!(motion(&hand, true).iter().all(|v| *v == 0.0));
     }
 
     /// Something moving on its own with its own motion vectors (the camera still): the
