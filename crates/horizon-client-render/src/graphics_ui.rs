@@ -397,7 +397,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         h(
                             H::Upscaler,
                             High,
-                            "What rebuilds the smaller picture. MetalFX: Apple's upscalers; Temporal is sharpest.",
+                            "MetalFX: Apple's upscalers. Temporal is sharpest, Spatial cheapest.",
                         ),
                         h(
                             H::ScreenshotQuality,

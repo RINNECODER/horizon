@@ -339,7 +339,7 @@
   "Upscaler": "Upscaler",
   "MetalFX Spatial": "MetalFX Spatial",
   "MetalFX Temporal": "MetalFX Temporal",
-  "What rebuilds the smaller picture. MetalFX: Apple's upscalers; Temporal is sharpest.": "What rebuilds the smaller picture. MetalFX: Apple's upscalers; Temporal is sharpest.",
+  "MetalFX: Apple's upscalers. Temporal is sharpest, Spatial cheapest.": "MetalFX: Apple's upscalers. Temporal is sharpest, Spatial cheapest.",
   "Upscaling Sharpness": "Upscaling Sharpness",
   "Paper White": "Paper White",
   "Peak Brightness": "Peak Brightness",
