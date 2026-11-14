@@ -1228,6 +1228,35 @@ impl<'a> Context<'a> {
                     .lower_expect_inner(stmt, frontend, condition, ExprPos::Rhs)?
                     .0;
 
+                // A constant ternary evaluates only the branch taken: the other may hold a
+                // constant the evaluator rejects (`x <= k ? a : log(x - k)`).
+                if self.is_const {
+                    if let Expression::Literal(Literal::Bool(taken)) = self[condition] {
+                        let (branch, other) = if taken {
+                            (accept, reject)
+                        } else {
+                            (reject, accept)
+                        };
+                        let (mut value, value_meta) =
+                            self.lower_expect_inner(stmt, frontend, branch, pos)?;
+                        // The untaken branch only sets the common type (GLSL implicit
+                        // conversion); if it does not evaluate, keep the taken one's type.
+                        if let Ok((other, other_meta)) =
+                            self.lower_expect_inner(stmt, frontend, other, pos)
+                        {
+                            if let (Some(own), Some(other)) = (
+                                self.expr_scalar_components(value, value_meta)?,
+                                self.expr_scalar_components(other, other_meta)?,
+                            ) {
+                                if type_power(own) < type_power(other) {
+                                    self.conversion(&mut value, value_meta, other)?;
+                                }
+                            }
+                        }
+                        return Ok((Some(value), meta));
+                    }
+                }
+
                 let (mut accept_body, (mut accept, accept_meta)) =
                     self.new_body_with_ret(|ctx| {
                         // Lower the `true` branch
