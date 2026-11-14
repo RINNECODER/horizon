@@ -272,6 +272,7 @@ pub(crate) mod upload;
 mod view;
 mod visbuffer;
 mod wgsl_prefix;
+mod metalfx;
 mod world_post;
 pub mod world_primitives;
 mod world_warp;
@@ -6948,6 +6949,10 @@ impl Renderer {
         self.world_post.taa = taa;
         self.world_post.upscale = if taa { upscale.clamp(1.0, 4.0) } else { 1.0 };
     }
+    /// The Upscaler setting: TAA, or MetalFX where the device has it (`gfx/metalfx.rs`).
+    pub fn set_upscaler(&mut self, upscaler: crate::graphics::Upscaler) {
+        self.world_post.metalfx.mode = upscaler;
+    }
     /// Runs `post` over the world from now on (`None`: no pack), for the dimension `dimension`;
     /// `block_ids` gives each source state its model and fluid material ids (two values
     /// per state); emission and ownership come from the mesher's quad records.
@@ -11664,6 +11669,9 @@ impl Renderer {
                 indices: self.indices.clone(),
                 quads: cloud_quads,
             }));
+            post.metalfx
+                .get_or_insert_with(|| metalfx::MetalFx::new(&self.device))
+                .mode = self.world_post.metalfx.mode;
             post.run(
                 &self.device,
                 &self.queue,

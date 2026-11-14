@@ -556,6 +556,53 @@ impl Upscaling {
     }
 }
 
+/// What rebuilds the world at the output size. MetalFX is macOS's (Metal only); elsewhere,
+/// or where MetalFX refuses the frame, TAA and the bilinear copy run as before.
+/// Spatial upscales whatever is smaller than the window (the world below 100% resolution
+/// scale, a shader pack's `final`); Temporal replaces TAA's resolve and, under a shader
+/// pack (whose own TAA jitters), works as Spatial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Upscaler {
+    #[default]
+    Taa,
+    MetalFxSpatial,
+    MetalFxTemporal,
+}
+impl Upscaler {
+    /// The choices this platform offers: MetalFX only on macOS.
+    pub const ALL: &'static [Upscaler] = if cfg!(target_os = "macos") {
+        &[
+            Upscaler::Taa,
+            Upscaler::MetalFxSpatial,
+            Upscaler::MetalFxTemporal,
+        ]
+    } else {
+        &[Upscaler::Taa]
+    };
+    pub fn name(self) -> &'static str {
+        match self {
+            Upscaler::Taa => "taa",
+            Upscaler::MetalFxSpatial => "metalfxSpatial",
+            Upscaler::MetalFxTemporal => "metalfxTemporal",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Upscaler::Taa => "TAA",
+            Upscaler::MetalFxSpatial => "MetalFX Spatial",
+            Upscaler::MetalFxTemporal => "MetalFX Temporal",
+        }
+    }
+    /// A file from macOS read elsewhere falls back to TAA.
+    fn parse(s: &str) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|u| u.name() == s)
+            .unwrap_or_default()
+    }
+}
+
 static REDUCED_SUGGESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Whether the settings suggest Reduced far detail: set when the renderer
 /// starts, on the GPUs `lod_capped` names (far terrain slows them most).
@@ -865,6 +912,8 @@ pub struct Graphics {
     pub upscaling: Upscaling,
     /// How much the upscaled picture is sharpened, 0..=100 (percent of the most).
     pub upscaling_sharpness: u32,
+    /// What rebuilds the world at the output size: TAA, or MetalFX on macOS.
+    pub upscaler: Upscaler,
     /// F2 screenshots at this many times the game's resolution: 1, 2, 4 or 8.
     pub screenshot_quality: u32,
     /// Frame generation (Horizon setting), off by default.
@@ -959,6 +1008,7 @@ impl Default for Graphics {
             taa: false,
             upscaling: Upscaling::Native,
             upscaling_sharpness: 85,
+            upscaler: Upscaler::Taa,
             screenshot_quality: 1,
             frame_generation: FrameGeneration::Off,
             hdr: HdrMode::Off,
@@ -1121,6 +1171,7 @@ impl Graphics {
                 "fxaa" => g.fxaa = flag(g.fxaa),
                 "taa" => g.taa = flag(g.taa),
                 "upscaling" => g.upscaling = Upscaling::parse(value),
+                "upscaler" => g.upscaler = Upscaler::parse(value),
                 "upscalingSharpness" => {
                     g.upscaling_sharpness = number(g.upscaling_sharpness).min(100)
                 }
@@ -1172,7 +1223,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrLighting:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nupscaler:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrLighting:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1215,6 +1266,7 @@ impl Graphics {
             bool_text(self.taa),
             self.upscaling.name(),
             self.upscaling_sharpness,
+            self.upscaler.name(),
             self.screenshot_quality,
             self.frame_generation.name(),
             self.hdr.key(),
@@ -1582,6 +1634,7 @@ mod tests {
             taa: true,
             upscaling: Upscaling::Balanced,
             upscaling_sharpness: 40,
+            upscaler: *Upscaler::ALL.last().unwrap(),
             screenshot_quality: 4,
             frame_generation: FrameGeneration::Fsr31,
             hdr: HdrMode::On,
@@ -1757,6 +1810,32 @@ mod tests {
         assert_eq!(peak_step_of(3250.0), 38.5);
         assert_eq!(peak_step_of(100.0), 0.0);
         assert_eq!(peak_step_of(20_000.0), PEAK_STEPS as f32);
+    }
+
+    #[test]
+    fn upscaler_reads_its_names_and_falls_back_to_taa() {
+        assert_eq!(Graphics::default().upscaler, Upscaler::Taa);
+        let read = |text: &str| Graphics::parse(text).upscaler;
+        let mac = cfg!(target_os = "macos");
+        let spatial = read("upscaler:metalfxSpatial\n");
+        let temporal = read("upscaler:metalfxTemporal\n");
+        assert_eq!(
+            spatial,
+            if mac {
+                Upscaler::MetalFxSpatial
+            } else {
+                Upscaler::Taa
+            }
+        );
+        assert_eq!(
+            temporal,
+            if mac {
+                Upscaler::MetalFxTemporal
+            } else {
+                Upscaler::Taa
+            }
+        );
+        assert_eq!(read("upscaler:dlss\n"), Upscaler::Taa);
     }
 
     #[test]

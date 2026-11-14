@@ -79,4 +79,5 @@ pub(super) fn apply_world_post(r: &mut Renderer, g: &Graphics, scale: u32) {
         g.upscaling.ratio(),
         g.upscaling_sharpness as f32 / 100.0,
     );
+    r.set_upscaler(g.upscaler);
 }
