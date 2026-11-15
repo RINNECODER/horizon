@@ -1516,9 +1516,9 @@ fn load_shadow(
     }
     loader.geometry = None;
     // Iris with DH: the far tiles cast shadows through dh_shadow alone (no fallback), with the
-    // shadow pass's terrain.
+    // shadow pass's terrain; `dhShadow.enabled = false` keeps them out of the shadow map.
     let dh_shadow = far
-        .filter(|_| keep("shadowTerrain"))
+        .filter(|_| keep("shadowTerrain") && keep("dhShadow.enabled"))
         .and_then(|f| {
             loader.load("dh_shadow".to_owned(), Group::Shadow, |v, fr| {
                 translate_shadow(v, fr, f)
@@ -3604,7 +3604,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
                 })
                 .collect()
         };
-        let load = |programs: &[&str], far: bool| {
+        let load_with = |programs: &[&str], far: bool, props: &str| {
             let files: Vec<_> = files(programs)
                 .into_iter()
                 .map(|(n, s)| (format!("shaders/{n}"), s))
@@ -3622,9 +3622,10 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
                 ..Default::default()
             };
             let macros = Macros::standard();
-            let properties = Properties::parse("shadow.enabled=true", &macros);
+            let properties = Properties::parse(props, &macros);
             load_post(&pack, "", &properties, &macros, &inputs)
         };
+        let load = |programs: &[&str], far: bool| load_with(programs, far, "shadow.enabled=true");
         let all = [
             "gbuffers_terrain",
             "gbuffers_water",
@@ -3644,6 +3645,9 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         );
         assert!(post.terrain.is_some() && post.water.is_some());
         assert!(post.shadow.is_some() && post.dh_shadow.is_some());
+        // `dhShadow.enabled = false` (Bliss): the far tiles cast no shadow, the near ones still do.
+        let post = load_with(&all, true, "shadow.enabled=true\ndhShadow.enabled=false");
+        assert!(post.shadow.is_some() && post.dh_shadow.is_none());
         let post = load(&all, false);
         assert!(post.dh_terrain.is_none() && post.dh_water.is_none() && post.dh_shadow.is_none());
         let post = load(

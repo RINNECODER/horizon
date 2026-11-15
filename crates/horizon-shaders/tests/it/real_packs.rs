@@ -197,6 +197,8 @@ fn real_packs_read() {
                     ..terrain.clone()
                 }),
                 glint: Some(terrain.clone()),
+                // As the game's far tiles: dh_terrain and dh_water read them.
+                far_terrain: Some(terrain.clone()),
                 hand_glint: Some(horizon_shaders::GbuffersInputs {
                     item_id_declared: true,
                     ..terrain.clone()
