@@ -100,14 +100,25 @@ fn fs_down(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     return sum;
 }
 
-// The first-person hand's pixels (where depthtex0 changed as it drew: `source` holds the depth
-// from before) at the near plane of the far tiles' depth: dh_water, which tests only that depth,
-// then leaves the hand alone.
+// What the near passes drew (terrain, entities, the hand: depthtex0 short of the far plane) into
+// the far tiles' depth, which shares the main projection: dh_water, which tests only that depth,
+// then stays behind them. The depth test keeps the nearer of the two.
 @fragment
-fn fs_hand_mask(@builtin(position) p: vec4<f32>) -> @builtin(frag_depth) f32 {
-    let at = vec2<i32>(p.xy);
-    if textureLoad(source, at, 0).r == textureLoad(world_depth, at, 0).r {
+fn fs_near_depth(@builtin(position) p: vec4<f32>) -> @builtin(frag_depth) f32 {
+    let depth = textureLoad(world_depth, vec2<i32>(p.xy), 0).r;
+    if depth >= 1.0 {
         discard;
     }
-    return 0.0;
+    return depth;
+}
+
+// Then, after dh_water, the far tiles' own depth back under what the near passes drew
+// (`source`: dhDepthTex1, from before dh_water): packs reading dhDepthTex0 see only far tiles.
+@fragment
+fn fs_far_depth_back(@builtin(position) p: vec4<f32>) -> @builtin(frag_depth) f32 {
+    let at = vec2<i32>(p.xy);
+    if textureLoad(world_depth, at, 0).r >= 1.0 {
+        discard;
+    }
+    return textureLoad(source, at, 0).r;
 }

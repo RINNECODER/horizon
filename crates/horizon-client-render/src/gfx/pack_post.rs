@@ -846,8 +846,9 @@ pub struct PackPost {
     /// None when it would write nothing: colortex0 holds integers and there is no depth to copy
     /// nor buffer to clear.
     blit: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
-    /// Writes the first-person hand into the far tiles' depth before `dh_water` (`stamp_hand`).
-    hand_mask: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
+    /// Writes what the near passes drew into the far tiles' depth before `dh_water` (`stamp_near`).
+    /// Then puts the far tiles' own depth back under them.
+    near_depth: Option<[(wgpu::RenderPipeline, wgpu::BindGroupLayout); 2]>,
     /// The blit also writes depthtex0 (some program reads it) and clears these buffers.
     blit_depth: bool,
     blit_clears: Vec<usize>,
@@ -3473,10 +3474,7 @@ impl PackPost {
             dh_terrain.is_none() && dh_water.is_none() && reads_depth(Source::DhDepth1);
         let depth1 = (water.is_some() || hand.is_some())
             && (reads_depth(Source::Depth1) || dh_reads_depth1 || (hand.is_none() && reads_depth2));
-        // dh_water tests only the far tiles' depth: the hand's pixels go into it first
-        // (`stamp_hand`), found by depthtex2, the depth before the hand.
-        let stamp_hand = hand.is_some() && dh_water.is_some();
-        let depth2 = hand.is_some() && (reads_depth2 || stamp_hand);
+        let depth2 = hand.is_some() && reads_depth2;
         let water_mask = (water.iter())
             .flat_map(|p| &p.samplers)
             .any(|s| s.source == Source::WaterMask);
@@ -3658,22 +3656,30 @@ impl PackPost {
                 }),
             )
         });
-        let unfiltered = wgpu::TextureSampleType::Float { filterable: false };
-        let hand_mask = stamp_hand.then(|| {
-            helper(
-                device,
-                "vs_full",
-                "fs_hand_mask",
-                &[texture_entry(0, unfiltered), texture_entry(1, unfiltered)],
-                &[],
-                Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-            )
+        // dh_water tests only the far tiles' depth: what the near passes drew goes into it first
+        // (`stamp_near`).
+        let near_depth = dh_water.is_some().then(|| {
+            let unfiltered = wgpu::TextureSampleType::Float { filterable: false };
+            [
+                ("fs_near_depth", wgpu::CompareFunction::Less),
+                ("fs_far_depth_back", wgpu::CompareFunction::Always),
+            ]
+            .map(|(entry, compare)| {
+                helper(
+                    device,
+                    "vs_full",
+                    entry,
+                    &[texture_entry(0, unfiltered), texture_entry(1, unfiltered)],
+                    &[],
+                    Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(compare),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                )
+            })
         });
         let copy = helper(
             device,
@@ -3919,7 +3925,7 @@ impl PackPost {
                 ..Default::default()
             }),
             blit,
-            hand_mask,
+            near_depth,
             copy,
             upscale,
             final_target: None,
@@ -4420,10 +4426,14 @@ impl PackPost {
             _ => None,
         };
         if let Some(far) = far {
-            if matches!(far, TerrainList::FarTranslucent) {
-                self.stamp_hand(device, encoder);
+            let water = matches!(far, TerrainList::FarTranslucent);
+            if water {
+                self.stamp_near(device, encoder, false);
             }
             self.draw_terrain_part(device, queue, encoder, size, far, false, draw);
+            if water {
+                self.stamp_near(device, encoder, true);
+            }
         }
         // dhDepthTex1: the far tiles' depth before dh_water.
         if matches!(list, TerrainList::Solid)
@@ -4443,22 +4453,26 @@ impl PackPost {
         }
     }
 
-    /// The opaque first-person hand into the far tiles' depth (`dhDepthTex0`) at the near plane,
-    /// so `dh_water`, which tests only that depth, doesn't draw the far water over the hand.
-    fn stamp_hand(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
-        let (Some((pipeline, layout)), Some(t)) = (&self.hand_mask, &self.targets) else {
+    /// What the near passes drew (terrain, entities, the opaque hand) into the far tiles' depth
+    /// (`dhDepthTex0`), which shares their projection, keeping the nearer: `dh_water` tests only
+    /// that depth, and drew far lakes over near cliffs, leaves and the hand. `back` (after
+    /// dh_water): the far tiles' own depth goes back under those pixels (from `dhDepthTex1`), so
+    /// packs reading `dhDepthTex0` later don't take near terrain for far tiles.
+    fn stamp_near(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, back: bool) {
+        let (Some(pipelines), Some(t)) = (&self.near_depth, &self.targets) else {
             return;
         };
-        let (Some((_, before)), Some([(_, far), _])) = (&t.depth2, &t.dh_depth) else {
+        let Some([(_, far), (_, before_water)]) = &t.dh_depth else {
             return;
         };
+        let (pipeline, layout) = &pipelines[usize::from(back)];
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shader pack hand mask"),
+            label: Some("Shader pack near depth"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(before),
+                    resource: wgpu::BindingResource::TextureView(before_water),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -4467,7 +4481,7 @@ impl PackPost {
             ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Shader pack hand mask"),
+            label: Some("Shader pack near depth"),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: far,
