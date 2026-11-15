@@ -350,6 +350,19 @@ impl Game<'_> {
                             macros.define_distant_horizons();
                         }
                         macros.define_iris_compat(&chosen_shader_options(name));
+                        log::info!(
+                            "shader pack {name}: DISTANT_HORIZONS {}, IS_IRIS {}",
+                            if far_terrain {
+                                "defined"
+                            } else {
+                                "not defined"
+                            },
+                            if macros.get("IS_IRIS").is_some() {
+                                "defined (HORIZON_IRIS_COMPAT)"
+                            } else {
+                                "not defined"
+                            }
+                        );
                         // Its conditionals test the pack's options too.
                         let (properties, notes) =
                             horizon_shaders::read_properties(&pack, &mut macros);

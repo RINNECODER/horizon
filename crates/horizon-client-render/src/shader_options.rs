@@ -45,7 +45,12 @@ impl ShaderOptions {
             saved: BTreeMap::new(),
         };
         for (name, value) in chosen {
-            out.set(&name, value);
+            // The Iris switch isn't a pack option, but it lives in the same file: keep it.
+            if name == horizon_shaders::IRIS_COMPAT_KEY {
+                out.chosen.insert(name, value);
+            } else {
+                out.set(&name, value);
+            }
         }
         out.saved = out.chosen.clone();
         out.changed = false;
@@ -166,7 +171,8 @@ impl ShaderOptions {
     }
 
     pub fn reset(&mut self) {
-        self.chosen.clear();
+        self.chosen
+            .retain(|k, _| k == horizon_shaders::IRIS_COMPAT_KEY);
         self.changed = self.chosen != self.saved;
     }
 
@@ -308,6 +314,36 @@ mod tests {
         assert!(o.changed);
         o.reset();
         assert!(o.chosen.is_empty());
+    }
+
+    #[test]
+    fn the_iris_switch_survives_changes_and_reset() {
+        let o = options();
+        let mut o = ShaderOptions::new(
+            o.pack,
+            o.options,
+            o.screens,
+            Lang::default(),
+            BTreeMap::from([(
+                horizon_shaders::IRIS_COMPAT_KEY.to_owned(),
+                "true".to_owned(),
+            )]),
+        );
+        o.cycle("AO", false);
+        assert_eq!(
+            o.chosen
+                .get(horizon_shaders::IRIS_COMPAT_KEY)
+                .map(String::as_str),
+            Some("true")
+        );
+        o.reset();
+        assert_eq!(
+            o.chosen,
+            BTreeMap::from([(
+                horizon_shaders::IRIS_COMPAT_KEY.to_owned(),
+                "true".to_owned()
+            )])
+        );
     }
 
     #[test]

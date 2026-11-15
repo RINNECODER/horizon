@@ -3381,6 +3381,11 @@ impl PackPost {
         if let Some(w) = &water {
             notes.push(format!("translucent terrain draws with {}", w.name));
         }
+        for (part, pass) in [("far terrain", &dh_terrain), ("far water", &dh_water)] {
+            if let Some(p) = pass {
+                notes.push(format!("{part} draws with {}", p.name));
+            }
+        }
         // Timed (and labelled) apart from the solid shadow pass that runs the same program.
         let mut shadow_water = shadow_water;
         if let Some(p) = &mut shadow_water {
