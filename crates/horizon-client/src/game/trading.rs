@@ -230,8 +230,8 @@ impl Game<'_> {
             origin,
             maps: Some(&maps),
         };
+        // The world's tables: its data packs' trade sets and tags.
         let offers = self
-            .res
             .stations()
             .trades
             .offers_from_set(&ctx, set, &mut random);

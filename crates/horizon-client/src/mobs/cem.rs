@@ -558,6 +558,14 @@ fn vanilla_part(model: &str, part: &str) -> String {
             .map(|i| format!("segment{}", i - 1))
             .or_else(|| n("wing").map(|i| format!("layer{}", i - 1))),
         ("endermite", _) => n("body").map(|i| format!("segment{}", i - 1)),
+        ("guardian" | "elder_guardian", "body") => Some("head".into()),
+        ("wolf" | "wolf_armor", "mane") => Some("upper_body".into()),
+        ("happy_ghast_harness", "body") => Some("harness".into()),
+        ("salmon", "fin_back_1") => Some("top_front_fin".into()),
+        ("salmon", "fin_back_2") => Some("top_back_fin".into()),
+        ("salmon" | "puffer_fish_small", "tail") => Some("back_fin".into()),
+        ("puffer_fish_small", "eye_left") => Some("left_eye".into()),
+        ("puffer_fish_small", "eye_right") => Some("right_eye".into()),
         ("guardian" | "elder_guardian", _) => n("spine")
             .map(|i| format!("spike{}", i - 1))
             .or_else(|| n("tail").map(|i| format!("tail{}", i - 1))),
@@ -578,9 +586,14 @@ fn vanilla_part(model: &str, part: &str) -> String {
         ("cat" | "ocelot" | "cat_collar", "tail") => Some("tail1".into()),
         ("bat", "outer_right_wing") => Some("right_wing_tip".into()),
         ("bat", "outer_left_wing") => Some("left_wing_tip".into()),
-        ("cod" | "tropical_fish_a" | "tropical_fish_b", "fin_back" | "fin_top") => {
-            Some("top_fin".into())
-        }
+        (
+            "cod"
+            | "tropical_fish_a"
+            | "tropical_fish_b"
+            | "tropical_fish_pattern_a"
+            | "tropical_fish_pattern_b",
+            "fin_back" | "fin_top",
+        ) => Some("top_fin".into()),
         // The big and medium pufferfish have blue fins; the small one has plain `right_fin`s
         // (the fin animation in aquatic.rs).
         ("puffer_fish_big" | "puffer_fish_medium", "fin_right") => Some("right_blue_fin".into()),
@@ -606,12 +619,28 @@ fn vanilla_part(model: &str, part: &str) -> String {
         ("strider" | "strider_saddle", _) => part
             .strip_prefix("hair_")
             .map(|rest| format!("{rest}_bristle")),
-        ("horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse", "neck") => {
-            Some("head_parts".into())
-        }
-        ("horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse", "mouth") => {
-            Some("upper_mouth".into())
-        }
+        (
+            "horse"
+            | "donkey"
+            | "mule"
+            | "skeleton_horse"
+            | "zombie_horse"
+            | "horse_armor"
+            | "skeleton_horse_armor"
+            | "zombie_horse_armor",
+            "neck",
+        ) => Some("head_parts".into()),
+        (
+            "horse"
+            | "donkey"
+            | "mule"
+            | "skeleton_horse"
+            | "zombie_horse"
+            | "horse_armor"
+            | "skeleton_horse_armor"
+            | "zombie_horse_armor",
+            "mouth",
+        ) => Some("upper_mouth".into()),
         _ => None,
     };
     renamed.unwrap_or_else(|| part.to_owned())

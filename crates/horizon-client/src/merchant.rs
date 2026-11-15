@@ -675,7 +675,12 @@ pub trait MapMaker {
 pub use horizon_world::loot::ExplorationMap;
 fn int_provider<R: RandomSource>(v: &Value, random: &mut R) -> i32 {
     match v {
-        Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
+        // A pack may write a whole number as a float (`"amount": 4.0`):
+        // `NumberProvider.getInt` rounds the float.
+        Value::Number(n) => {
+            n.as_i64()
+                .unwrap_or_else(|| n.as_f64().unwrap_or(0.0).round() as i64) as i32
+        }
         Value::Object(o) => match o.get("type").and_then(Value::as_str).unwrap_or("") {
             "minecraft:uniform" => {
                 let (min, max) = (
@@ -1234,6 +1239,14 @@ mod tests {
                 .iter()
                 .all(|o| o.max_uses == 12 && (o.price_multiplier - 0.2).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn a_float_trade_set_amount_counts() {
+        // Balanced Villager Trades writes `"amount": 4.0`.
+        let mut r = sequence_random(1, "x");
+        assert_eq!(int_provider(&json!(4.0), &mut r), 4);
+        assert_eq!(int_provider(&json!(2), &mut r), 2);
     }
 
     #[test]
