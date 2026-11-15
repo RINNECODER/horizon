@@ -24,7 +24,8 @@ pub enum Compat {
 }
 
 impl Compat {
-    fn key(self) -> &'static str {
+    /// Its part of the `pack.incompatible.*` keys.
+    pub fn key(self) -> &'static str {
         match self {
             Compat::TooOld => "old",
             Compat::TooNew => "new",
@@ -316,6 +317,15 @@ struct Confirm {
     action: ConfirmAction,
     title: Text,
     message: Text,
+}
+
+/// What a press on a pack card does ([`PackScreen::press`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    /// To the other list: select or unselect.
+    Transfer,
+    Up,
+    Down,
 }
 
 /// What a click on the screen asks the game to do.
@@ -769,30 +779,81 @@ impl PackScreen {
         let left = (0..16).contains(&rx) && (0..32).contains(&ry);
         let top_right = (16..32).contains(&rx) && (0..16).contains(&ry);
         let bottom_right = (16..32).contains(&rx) && (16..32).contains(&ry);
-        let index = self.model_index(side, id).unwrap_or(0);
-        let s = side == 1;
-        if sel && icon {
-            if self
-                .info(id)
-                .is_some_and(|p| p.compat != Compat::Compatible)
-            {
-                self.open_confirm(id);
-                return true;
-            }
-            self.model.activate(s, index, true);
-        } else if unsel && left {
-            self.model.activate(s, index, false);
+        let what = if (sel && icon) || (unsel && left) {
+            Move::Transfer
         } else if up && top_right {
-            self.model.move_by(s, index, true);
+            Move::Up
         } else if down && bottom_right {
-            self.model.move_by(s, index, false);
+            Move::Down
         } else {
             return true;
+        };
+        let _ = m;
+        !self.press(side, id, what)
+    }
+    /// A host drawing its own pack screen (a UI mod): the packs a list holds now, in its order
+    /// (`side` 0 available, 1 selected), each with what it can do: select, unselect, move up,
+    /// move down. A pack that is fixed and required can do nothing.
+    pub fn listed(&self, side: usize) -> Vec<(&PackInfo, [bool; 4])> {
+        (self.lists[side].entries.iter())
+            .filter_map(|e| match &e.row {
+                Row::Pack(id) => self.info(id),
+                Row::Header => None,
+            })
+            .map(|p| {
+                let (a, b, c, d) = self.flags(side, &p.id);
+                let free = self.overlay(&p.id);
+                (p, [a && free, b && free, c && free, d && free])
+            })
+            .collect()
+    }
+    /// What a press on a card's icon does (`PackEntry.mouseClicked`): move the pack to the other
+    /// list (an incompatible one asks first, `pack.incompatible.confirm`), or up or down its
+    /// list. Whether the selection changed.
+    pub fn press(&mut self, side: usize, id: &str, what: Move) -> bool {
+        let Some(index) = self.model_index(side, id) else {
+            return false;
+        };
+        let (sel, unsel, up, down) = self.flags(side, id);
+        let s = side == 1;
+        match what {
+            _ if !self.overlay(id) => return false,
+            Move::Transfer if sel => {
+                if self
+                    .info(id)
+                    .is_some_and(|p| p.compat != Compat::Compatible)
+                {
+                    self.open_confirm(id);
+                    return false;
+                }
+                self.model.activate(s, index, true);
+            }
+            Move::Transfer if unsel => {
+                self.model.activate(s, index, false);
+            }
+            Move::Up if up => {
+                self.model.move_by(s, index, true);
+            }
+            Move::Down if down => {
+                self.model.move_by(s, index, false);
+            }
+            _ => return false,
         }
         self.changed = true;
         self.populate(Some(id));
-        let _ = m;
-        false
+        true
+    }
+    /// A host that asked the player itself selects an incompatible pack anyway, as Yes on
+    /// vanilla's confirmation does. Whether the selection changed.
+    pub fn select_anyway(&mut self, id: &str) -> bool {
+        self.confirm = None;
+        let Some(index) = self.model_index(0, id) else {
+            return false;
+        };
+        self.model.activate(false, index, true);
+        self.changed = true;
+        self.populate(Some(id));
+        true
     }
     /// `handlePackSelection` of an incompatible pack: the ConfirmScreen
     /// (the pack screen loses its focus as `Gui.setScreen` clears it).
@@ -2338,6 +2399,35 @@ mod icon_slot_tests {
             crate::widgets::Cursor::ResizeNs
         );
     }
+    /// A host's presses move packs as vanilla's icon clicks do, in the lists' order.
+    #[test]
+    fn a_host_moves_packs_between_and_within_the_lists() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let mut s = screen(&m, 3, 240);
+        let ids = |s: &PackScreen, side| {
+            s.listed(side)
+                .iter()
+                .map(|(p, _)| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(ids(&s, 1).is_empty());
+        assert!(s.press(0, "file/pack000", Move::Transfer));
+        assert!(s.press(0, "file/pack001", Move::Transfer));
+        let picked = ids(&s, 1);
+        assert_eq!(picked.len(), 2);
+        assert!(!ids(&s, 0).contains(&"file/pack000".to_owned()));
+        // The lower one moves up: the two swap.
+        assert!(s.press(1, &picked[1], Move::Up));
+        assert_eq!(ids(&s, 1), vec![picked[1].clone(), picked[0].clone()]);
+        // The top one can't go higher; an unknown id does nothing.
+        assert!(!s.press(1, &picked[1], Move::Up));
+        assert!(!s.press(1, "file/nope", Move::Transfer));
+        assert!(s.changed);
+        assert!(s.press(1, &picked[0], Move::Transfer));
+        assert_eq!(ids(&s, 1), vec![picked[1].clone()]);
+    }
+
     fn screen(m: &Measure, count: usize, height: i32) -> PackScreen {
         PackScreen::new(
             m,

@@ -813,3 +813,137 @@ fn the_right_button_steps_no_choice_as_vanillas_cycle_button() {
     );
     assert!(shell.screen.pressed.is_empty());
 }
+
+/// A screen with a tab bar (pages 0 and 1), a page reached only by a link (2), and a page it
+/// draws itself (3) that records what the search hands it.
+#[derive(Default)]
+struct Tabbed {
+    own_query: std::cell::RefCell<String>,
+}
+const VOLUME: u32 = 7;
+const TO_LINKED: u32 = 8;
+impl Screen for Tabbed {
+    type Page = u8;
+    type Row = u32;
+    fn title(&self) -> &'static str {
+        "Tabbed"
+    }
+    fn stamp(&self, _: &Settings) -> u64 {
+        0
+    }
+    fn sheets(&self, _: &Settings) -> Vec<Sheet<u8, u32>> {
+        let sheet = |id, name: &str, rows| {
+            let mut sheet = Sheet::new(
+                id,
+                name.to_owned(),
+                String::new(),
+                vec![Group { name: "G", rows }],
+            );
+            sheet.listed = id == 0;
+            sheet
+        };
+        vec![
+            sheet(
+                0,
+                "Main",
+                vec![Row::new(TO_LINKED, "Sound".to_owned(), Value::Press)],
+            ),
+            sheet(
+                1,
+                "Other",
+                vec![Row::new(1, "Thing".to_owned(), Value::Switch(false))],
+            ),
+            sheet(
+                2,
+                "Sound",
+                vec![Row::new(VOLUME, "Volume".to_owned(), Value::Switch(false))],
+            ),
+            sheet(3, "Cards", Vec::new()),
+        ]
+    }
+    fn press(&mut self, _: &mut Settings, _: u32, _: bool) -> Vec<Output> {
+        vec![CHANGED]
+    }
+    fn link(&self, row: u32) -> Option<u8> {
+        (row == TO_LINKED).then_some(2)
+    }
+    fn tabs(&self) -> Vec<u8> {
+        vec![0, 1]
+    }
+    fn hits_open(&self) -> bool {
+        true
+    }
+    fn own_page(&self, page: u8) -> Option<&'static str> {
+        (page == 3).then_some("Search cards")
+    }
+    fn draw_own(&mut self, _: &Settings, _: &mut HudBatch, _: &HudAtlas, own: &Own) -> OwnDrawn {
+        self.own_query.replace(own.query.clone());
+        OwnDrawn::default()
+    }
+}
+
+fn draw_tabbed(shell: &mut Shell<Tabbed>, s: &Settings, atlas: &HudAtlas) {
+    let mut batch = HudBatch::new([1708, 960]);
+    shell.draw(s, &mut batch, atlas, (0.0, 0.0), false, None);
+}
+
+/// A tab opens its page alone, and a page a link opened lights the tab it was reached from.
+#[test]
+fn a_tab_opens_its_page_and_a_linked_page_lights_its_tab() {
+    let (atlas, mut s) = (atlas(), Settings::default());
+    let mut shell = Shell::<Tabbed>::default();
+    draw_tabbed(&mut shell, &s, &atlas);
+    let (page, rect) = shell.tabs_drawn[1];
+    assert_eq!(page, 1);
+    let middle = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+    assert_eq!(
+        shell.click(&mut s, middle, SIZE, false, false, false),
+        [CLICK]
+    );
+    assert_eq!(shell.page(), Some(1));
+    shell.show(0);
+    draw_tabbed(&mut shell, &s, &atlas);
+    let at = shell.point_at(&s, SIZE, TO_LINKED);
+    shell.click(&mut s, at, SIZE, false, false, false);
+    assert_eq!(shell.page(), Some(2));
+    let view = shell.view(&s, SIZE);
+    assert_eq!(shell.lit_tab(&view), Some(0));
+}
+
+/// While searching, a press on a found row opens its page with the row focused, unchanged; Escape
+/// goes back to where the search started.
+#[test]
+fn a_search_hit_opens_its_page_with_the_row_focused() {
+    let (atlas, mut s) = (atlas(), Settings::default());
+    let mut shell = Shell::<Tabbed>::default();
+    draw_tabbed(&mut shell, &s, &atlas);
+    shell.focus = Some(Target::Search);
+    shell.type_text("volume");
+    draw_tabbed(&mut shell, &s, &atlas);
+    let at = shell.point_at(&s, SIZE, VOLUME);
+    assert_eq!(shell.click(&mut s, at, SIZE, false, false, false), [CLICK]);
+    draw_tabbed(&mut shell, &s, &atlas);
+    assert_eq!(shell.page(), Some(2));
+    assert_eq!(shell.focused(), Some(Target::Row(VOLUME)));
+    assert!(shell.search.value.is_empty());
+    assert_eq!(shell.key(&mut s, K::Escape, None, false, SIZE), []);
+    assert_eq!(shell.page(), Some(0));
+}
+
+/// On a page the screen draws itself, the search filters that page instead of every page.
+#[test]
+fn an_own_page_takes_the_search_as_its_filter() {
+    let (atlas, s) = (atlas(), Settings::default());
+    let mut shell = Shell::<Tabbed>::default();
+    shell.show(3);
+    shell.focus = Some(Target::Search);
+    shell.type_text("Ash");
+    draw_tabbed(&mut shell, &s, &atlas);
+    assert_eq!(*shell.screen.own_query.borrow(), "ash");
+    assert_eq!(shell.search.message, lang::get("Search cards"));
+    let view = shell.view(&s, SIZE);
+    assert!(
+        view.lines.is_empty(),
+        "no other page's rows show as results"
+    );
+}

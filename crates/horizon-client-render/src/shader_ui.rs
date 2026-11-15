@@ -51,8 +51,6 @@ const GENERAL: &str = "General";
 const INSTALLED: &str = "Installed";
 const BUILT_IN: &str = "Built-in settings";
 const PACK_OPTIONS: &str = "Pack settings";
-/// The line over the picked pack's screens in the page list.
-const PACK_HEADING: &str = "%s settings";
 /// What the strip says of a pack's own screens: they are the pack's, not Horizon's.
 const PACK_SETTINGS: &str = "Settings made by the pack's author: they change only this pack.";
 const NO_PACKS: &str = "No shader packs yet: open the pack folder and put some in it.";
@@ -100,6 +98,15 @@ fn native(s: &Settings) -> Option<(usize, &crate::shader_pack_list::Entry)> {
 /// The `.0`th option name of a `shaders/` pack.
 fn option_name(o: &crate::shader_options::ShaderOptions, i: u16) -> Option<&str> {
     o.options.keys().nth(usize::from(i)).map(String::as_str)
+}
+
+/// A classic pack's option whose every value reads the same: stepping it shows nothing new.
+fn one_value(item: Item, s: &Settings) -> bool {
+    let Item::Option(i) = item else { return false };
+    let Some(o) = classic(s).filter(|_| native(s).is_none()) else {
+        return false;
+    };
+    option_name(o, i).is_some_and(|name| o.reads_alike(name))
 }
 
 fn plain(t: Text) -> String {
@@ -385,6 +392,8 @@ fn row(item: Item, s: &Settings, screens: &[PackScreen]) -> Row<Item> {
             steps: slider_steps(item, s),
             text,
         },
+        // An option whose values all read alike (a pack's credit line) reads; stepping shows nothing.
+        (Item::Option(_), None, None, Some(text)) if one_value(item, s) => Value::Read(text),
         (Item::Option(_) | Item::Profile, None, None, Some(text)) => Value::Choice(text),
         _ => Value::Press,
     };
@@ -481,7 +490,7 @@ impl shell::Screen for ShaderScreen {
             }];
             let mut sheet = Sheet::new(Tab::Screen(i as u16), screen.title.clone(), about, groups);
             sheet.listed = screen.depth <= LISTED_DEPTH;
-            sheet.heading = (i == 0).then(|| lang::tr(PACK_HEADING, &[&pack_name(s)]));
+            sheet.heading = (i == 0).then(|| pack_name(s).to_owned());
             sheets.push(sheet);
         }
         sheets
@@ -793,7 +802,7 @@ mod tests {
                 (Tab::Screen(2), "SHADOWS", false),
             ]
         );
-        assert_eq!(sheets[1].heading.as_deref(), Some("A settings"));
+        assert_eq!(sheets[1].heading.as_deref(), Some("A"));
         assert!(
             sheets
                 .iter()

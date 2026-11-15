@@ -1416,6 +1416,69 @@ pub(crate) trait Screen {
     fn differs(&self, _s: &Settings, _before: &Settings) -> Option<bool> {
         None
     }
+    /// Pages in a tab bar across the plate's top, in place of its heading. A page a link opened
+    /// lights the tab it was reached from, its name after the tab's.
+    fn tabs(&self) -> Vec<Self::Page> {
+        Vec::new()
+    }
+    /// While searching, a press on a found row opens its page with the row focused, rather than
+    /// changing it there.
+    fn hits_open(&self) -> bool {
+        false
+    }
+    /// A page the screen draws itself in the list's place (cards, say): the search field's hint
+    /// while it is open, whose text then filters that page rather than searching every page.
+    fn own_page(&self, _page: Self::Page) -> Option<&'static str> {
+        None
+    }
+    /// Draw the own page in `own.area`, scrolled by `own.scroll`.
+    fn draw_own(
+        &mut self,
+        _s: &Settings,
+        _batch: &mut HudBatch,
+        _atlas: &HudAtlas,
+        _own: &Own,
+    ) -> OwnDrawn {
+        OwnDrawn::default()
+    }
+    /// A click on the own page (`own.cursor`).
+    fn click_own(&mut self, _s: &mut Settings, _own: &Own, _shift: bool) -> Vec<Output> {
+        Vec::new()
+    }
+    /// A key while the own page has the focus: `None` leaves it to the shell (Tab, say).
+    fn key_own(
+        &mut self,
+        _s: &mut Settings,
+        _key: winit::keyboard::KeyCode,
+        _shift: bool,
+        _own: &Own,
+    ) -> Option<Vec<Output>> {
+        None
+    }
+}
+
+/// An own page's place ([`Screen::own_page`]) and what it is drawn for.
+#[derive(Clone, Debug)]
+pub(crate) struct Own {
+    /// The list's view.
+    pub(crate) area: [f32; 4],
+    pub(crate) scroll: f32,
+    /// The pointer, while it is over the area.
+    pub(crate) cursor: Option<(f32, f32)>,
+    /// The search, lower case and trimmed.
+    pub(crate) query: String,
+    /// The page has the keyboard's focus, and shows it.
+    pub(crate) focused: bool,
+}
+/// What an own page drew.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OwnDrawn {
+    /// Its content's height, for the scroll.
+    pub(crate) content: f32,
+    /// What the strip says (a name and its description) for what is pointed at or focused.
+    pub(crate) said: Option<(String, String)>,
+    /// Where the keyboard's focus is, from the content's top and how high: the list follows it.
+    pub(crate) focus: Option<(f32, f32)>,
 }
 
 /// Whether `outputs` say a setting changed, or a key is being bound to one.
@@ -1529,6 +1592,10 @@ pub(crate) enum Target<P, R> {
     /// A binding row's reset button.
     Reset(R),
     Page(P),
+    /// A page in the tab bar (`Screen::tabs`).
+    Tab(P),
+    /// The page the screen draws itself (`Screen::own_page`).
+    Own,
     Search,
     Undo,
     Apply,
@@ -1606,6 +1673,12 @@ pub(crate) struct Shell<S: Screen> {
     /// The page list as last drawn: what a press or a key picks is what is on the screen (the
     /// collapsed row's arrows sit either side of a name as wide as the font draws it).
     drawn: Option<PageList<S::Page>>,
+    /// The tab bar as last drawn (`Screen::tabs`).
+    tabs_drawn: Vec<(S::Page, [f32; 4])>,
+    /// The own page's content height as last drawn (`Screen::draw_own`).
+    own_content: f32,
+    /// A key moved the own page's focus: the list follows it at the next draw.
+    own_follow: bool,
 }
 impl<S: Screen + Default> Default for Shell<S> {
     fn default() -> Self {
@@ -1633,6 +1706,9 @@ impl<S: Screen + Default> Default for Shell<S> {
             path: Vec::new(),
             pending: false,
             drawn: None,
+            tabs_drawn: Vec::new(),
+            own_content: 0.0,
+            own_follow: false,
         }
     }
 }
@@ -1641,8 +1717,181 @@ impl<S: Screen> Shell<S> {
     pub(crate) fn focus_soon(&mut self, row: S::Row) {
         self.focus_next = Some(row);
     }
+    /// What every page is searched for: nothing while an own page is open, whose filter it is.
     fn query(&self) -> String {
+        if self.own_open() {
+            return String::new();
+        }
+        self.typed()
+    }
+    fn typed(&self) -> String {
         self.search.value.trim().to_lowercase()
+    }
+    /// The open page is one the screen draws itself.
+    fn own_open(&self) -> bool {
+        self.page
+            .is_some_and(|page| self.screen.own_page(page).is_some())
+    }
+    /// The list's content height: the own page's as it was last drawn.
+    fn content(&self, view: &View<S::Page, S::Row>) -> f32 {
+        if self.own_open() {
+            self.own_content
+        } else {
+            view.content
+        }
+    }
+    fn own(&self, view: &View<S::Page, S::Row>, cursor: (f32, f32)) -> Own {
+        let cols = &view.cols;
+        let area = [cols.list_x, cols.top, cols.list_w, cols.bottom - cols.top];
+        let [x, y, w, h] = area;
+        Own {
+            area,
+            scroll: self.scroll.amount,
+            cursor: ui::hovered(cursor, x, y, w, h).then_some(cursor),
+            query: self.typed(),
+            focused: self.shows_focus(Target::Own),
+        }
+    }
+    /// Open tab `page`, alone, as a press on it does.
+    fn open_tab(&mut self, page: S::Page) -> Vec<Output> {
+        self.page = Some(page);
+        self.path.clear();
+        self.scroll.amount = 0.0;
+        self.search.set_value("");
+        self.picked = None;
+        self.can_change_value = false;
+        self.rebuild();
+        vec![CLICK]
+    }
+    /// The tab lit: the open page's, or the one the links to it were followed from.
+    fn lit_tab(&self, view: &View<S::Page, S::Row>) -> Option<S::Page> {
+        let tabs = self.screen.tabs();
+        let current = self
+            .page
+            .filter(|p| view.pages.iter().any(|v| v.id == *p))
+            .or(view.pages.first().map(|p| p.id))?;
+        if tabs.contains(&current) {
+            return Some(current);
+        }
+        self.path.iter().copied().find(|p| tabs.contains(p))
+    }
+    /// The tab bar across the plate's top, the lit tab with the open page's name after its own
+    /// when a link opened it.
+    fn draw_tabs(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        view: &View<S::Page, S::Row>,
+        cursor: (f32, f32),
+    ) {
+        let [px, py, pw, _] = view.cols.plate;
+        let name_of = |page| {
+            let found = view.pages.iter().find(|p| p.id == page);
+            found.map(|p| p.name.clone()).unwrap_or_default()
+        };
+        let lit = self.lit_tab(view);
+        let current = self.page.or(view.pages.first().map(|p| p.id));
+        let mut x = px + 6.0;
+        let right = px + pw - 6.0;
+        self.tabs_drawn.clear();
+        for page in self.screen.tabs() {
+            let mut label = name_of(page);
+            if Some(page) == lit
+                && let Some(sub) = current.filter(|c| *c != page)
+            {
+                label = format!("{label} › {}", name_of(sub));
+            }
+            let room = (right - x - 12.0).max(0.0);
+            let label = style::fit(atlas, &label, room);
+            let w = (atlas.font.width(&label) + 12.0).min(right - x);
+            if w < 14.0 {
+                break;
+            }
+            let rect = [x, py + 4.0, w, 18.0];
+            let open = Some(page) == lit;
+            let hover = ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+            crate::widgets::record(&label, rect, true);
+            crate::widgets::narratable(|| {
+                crate::widgets::Narratable::button(label.clone(), rect, true)
+                    .hovered(hover)
+                    .focused(self.shows_focus(Target::Tab(page)))
+            });
+            crate::widgets::widget_cursor(hover, true);
+            crate::widgets::target_as(rect, crate::widgets::Kind::Tab(open));
+            if open {
+                style::fill(batch, atlas, rect, style::open());
+                style::fill(batch, atlas, [x, py + 20.0, w, 2.0], style::accent());
+            } else if hover {
+                style::fill(batch, atlas, rect, style::hover());
+            }
+            let color = if open || hover {
+                style::WHITE
+            } else {
+                style::soft()
+            };
+            let text = Text::literal(label);
+            batch.text_styled(atlas, &text, x + 6.0, py + 9.0, color, true);
+            if self.shows_focus(Target::Tab(page)) {
+                style::ring(batch, atlas, rect, style::WHITE);
+            }
+            self.tabs_drawn.push((page, rect));
+            x += w + 2.0;
+        }
+        style::fill(
+            batch,
+            atlas,
+            [px + 8.0, py + 24.0, pw - 16.0, 1.0],
+            style::head_rule(),
+        );
+    }
+    /// The strip over an own page's row: its name, and what it does.
+    fn draw_own_dock(
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cols: &Columns,
+        (name, about): (String, String),
+    ) {
+        let [x, y, w, _] = cols.dock;
+        style::panel(batch, atlas, cols.dock);
+        let name = Text::literal(style::fit(atlas, &name, w - 2.0 * DOCK_INSET));
+        batch.text_styled(
+            atlas,
+            &name,
+            x + DOCK_INSET,
+            y + DOCK_NAME_Y,
+            style::WHITE,
+            true,
+        );
+        crate::widgets::record(&about, cols.dock, false);
+        dock_note(batch, atlas, cols, about, style::GREY);
+    }
+    /// Undo and Apply, over Done, only once there is something for them to do. A controller's
+    /// X presses Apply where there is one, else Undo.
+    fn draw_foot(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cols: &Columns,
+        cursor: (f32, f32),
+    ) {
+        for (target, rect) in self.foot(cols) {
+            use crate::widgets::Action as Declared;
+            let (label, declared, primary) = match target {
+                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
+                Target::Apply => (APPLY, Some(Declared::Apply), true),
+                _ => (DONE, Some(Declared::Done), true),
+            };
+            let label = Text::literal(lang::get(label));
+            let flags = (self.shows_focus(target), primary);
+            let room = match declared {
+                Some(declared) => {
+                    crate::widgets::declare_action(declared, rect, true);
+                    crate::widgets::action_glyph_room()
+                }
+                None => 0.0,
+            };
+            foot_button(batch, atlas, rect, &label, cursor, flags, room);
+        }
     }
     fn shows_focus(&self, target: Target<S::Page, S::Row>) -> bool {
         self.keyed && self.focus == Some(target)
@@ -1672,8 +1921,8 @@ impl<S: Screen> Shell<S> {
                 view
             }
         };
-        self.scroll
-            .clamp(view.cols.top, view.cols.bottom, view.content);
+        let content = self.content(&view);
+        self.scroll.clamp(view.cols.top, view.cols.bottom, content);
         // A page gone (another shader pack has fewer screens): the first page opens.
         if let Some(page) = self.page
             && !view.pages.iter().any(|p| p.id == page)
@@ -1729,6 +1978,10 @@ impl<S: Screen> Shell<S> {
     pub(crate) fn changed_elsewhere(&mut self) {
         self.did(&[Output::Event(crate::options_ui::Event::Changed)]);
     }
+    /// The page shown, `None` while it is the first.
+    pub(crate) fn page(&self) -> Option<S::Page> {
+        self.page
+    }
     /// Open at `page`.
     pub(crate) fn show(&mut self, page: S::Page) {
         self.page = Some(page);
@@ -1754,6 +2007,32 @@ impl<S: Screen> Shell<S> {
         self.rebuild();
         vec![CLICK]
     }
+    /// Open the page a search found `row` on, the row focused as the keyboard would; Escape goes
+    /// back to the page the search started from.
+    fn open_hit(&mut self, row: S::Row) -> Vec<Output> {
+        let on = self.built.as_ref().and_then(|(_, view)| {
+            let mut lines = view.lines.iter();
+            let line = lines.find(|l| l.setting.is_some_and(|i| view.rows[i].id == row));
+            line.map(|l| (l.page, view.pages.first().map(|p| p.id)))
+        });
+        let Some((page, first)) = on else {
+            return Vec::new();
+        };
+        let from = self.page.or(first);
+        self.path.clear();
+        if let Some(from) = from.filter(|from| *from != page) {
+            self.path.push(from);
+        }
+        self.page = Some(page);
+        self.scroll.amount = 0.0;
+        self.search.set_value("");
+        self.picked = None;
+        self.focus = None;
+        self.can_change_value = false;
+        self.focus_next = Some(row);
+        self.rebuild();
+        vec![CLICK]
+    }
     /// The screen's rows: the open page's or, while searching, every page's whose name or
     /// description has the search in it, under their pages' names. The row being changed stays
     /// whatever it reads now.
@@ -1776,7 +2055,10 @@ impl<S: Screen> Shell<S> {
                 listed: sheet.listed,
                 heading: sheet.heading,
             });
-            if query.is_empty() && open != Some(sheet.id) {
+            // An own page draws itself; its rows only answer the search from other pages.
+            if query.is_empty()
+                && (open != Some(sheet.id) || self.screen.own_page(sheet.id).is_some())
+            {
                 continue;
             }
             let mut titled = query.is_empty();
@@ -2027,6 +2309,9 @@ impl<S: Screen> Shell<S> {
         if let Some(page) = self.screen.link(row.id) {
             return self.follow(row.id, page);
         }
+        if !stepped && self.screen.hits_open() && !self.query().is_empty() {
+            return self.open_hit(row.id);
+        }
         match row.value {
             Value::Note | Value::Read(_) => Vec::new(),
             // The shell, not the screen, starts the wait.
@@ -2067,6 +2352,15 @@ impl<S: Screen> Shell<S> {
     ) -> Vec<(Target<S::Page, S::Row>, [f32; 4])> {
         let cols = &view.cols;
         let mut out = vec![(Target::Search, cols.search())];
+        out.extend(
+            self.tabs_drawn
+                .iter()
+                .map(|&(page, rect)| (Target::Tab(page), rect)),
+        );
+        if self.own_open() {
+            let area = [cols.list_x, cols.top, cols.list_w, cols.bottom - cols.top];
+            out.push((Target::Own, area));
+        }
         for (page, rect, _) in self.places(view).places {
             if self.has(page, view) {
                 out.push((Target::Page(page), rect));
@@ -2332,6 +2626,8 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         side_lines(batch, atlas, &cols, pages.used, &self.screen.side());
         self.drawn = Some(pages);
         let focused = self.focus == Some(Target::Search);
+        let hint = self.page.and_then(|p| self.screen.own_page(p));
+        self.search.message = lang::get(hint.unwrap_or("Search options"));
         search_field(&mut self.search, batch, atlas, &cols, cursor, focused);
         let name_of = |page| {
             view.pages
@@ -2340,15 +2636,41 @@ impl<S: Screen + Default> Hosted for Shell<S> {
                 .map(|p| p.name.clone())
         };
         let query = self.search.value.trim();
-        let heading = if query.is_empty() {
+        let tabbed = self.query().is_empty() && !self.screen.tabs().is_empty();
+        let heading = if tabbed {
+            String::new()
+        } else if self.query().is_empty() {
             current.and_then(name_of).unwrap_or_default()
         } else {
             lang::get("Results for \"%s\"").replace("%s", query)
         };
         self::plate(batch, atlas, &cols, &heading);
+        if tabbed {
+            self.draw_tabs(batch, atlas, &view, cursor);
+        } else {
+            self.tabs_drawn.clear();
+        }
         let over_list = cursor.1 >= cols.top && cursor.1 < cols.bottom;
         let mut described = None;
         let mut waiting = None;
+        if self.own_open() {
+            let own = self.own(&view, cursor);
+            let drawn = self.screen.draw_own(s, batch, atlas, &own);
+            self.own_content = drawn.content;
+            if std::mem::take(&mut self.own_follow)
+                && let Some((y, h)) = drawn.focus
+            {
+                let rect = [0.0, cols.top + y - self.scroll.amount, 0.0, h];
+                scroll_into_view(&mut self.scroll, rect, &cols, drawn.content);
+            }
+            scroller(batch, atlas, &cols, drawn.content, self.scroll.amount);
+            match drawn.said {
+                Some(said) => Self::draw_own_dock(batch, atlas, &cols, said),
+                None => self.draw_dock(batch, atlas, &view, None, current),
+            }
+            self.draw_foot(batch, atlas, &cols, cursor);
+            return;
+        }
         self::list(
             batch,
             atlas,
@@ -2377,26 +2699,7 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             crate::widgets::focus_link(cols.search(), true, row);
         }
         self.draw_dock(batch, atlas, &view, waiting.or(described), current);
-        // Undo and Apply, over Done, only once there is something for them to do. A controller's
-        // X presses Apply where there is one, else Undo.
-        for (target, rect) in self.foot(&cols) {
-            use crate::widgets::Action as Declared;
-            let (label, declared, primary) = match target {
-                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
-                Target::Apply => (APPLY, Some(Declared::Apply), true),
-                _ => (DONE, Some(Declared::Done), true),
-            };
-            let label = Text::literal(lang::get(label));
-            let flags = (self.shows_focus(target), primary);
-            let room = match declared {
-                Some(declared) => {
-                    crate::widgets::declare_action(declared, rect, true);
-                    crate::widgets::action_glyph_room()
-                }
-                None => 0.0,
-            };
-            foot_button(batch, atlas, rect, &label, cursor, flags, room);
-        }
+        self.draw_foot(batch, atlas, &cols, cursor);
     }
     fn click(
         &mut self,
@@ -2424,7 +2727,8 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             }
             if self.scroll.held() {
                 self.picked = None;
-                self.scroll.drag(y, cols.top, cols.bottom, view.content);
+                let content = self.content(&view);
+                self.scroll.drag(y, cols.top, cols.bottom, content);
                 return Vec::new();
             }
             if let Some(row) = self.dragging {
@@ -2438,10 +2742,11 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         if right {
             return Vec::new();
         }
+        let content = self.content(&view);
         if cols.scrolls()
             && self
                 .scroll
-                .press((x, y), cols.bar_x(), cols.top, cols.bottom, view.content)
+                .press((x, y), cols.bar_x(), cols.top, cols.bottom, content)
         {
             return Vec::new();
         }
@@ -2485,6 +2790,21 @@ impl<S: Screen + Default> Hosted for Shell<S> {
                 self.pick(page, &view);
                 return vec![CLICK];
             }
+        }
+        let tab = self.tabs_drawn.iter().find(|(_, rect)| at(*rect));
+        if let Some(&(page, _)) = tab {
+            self.focus = Some(Target::Tab(page));
+            return self.open_tab(page);
+        }
+        if self.own_open() {
+            let own = self.own(&view, (x, y));
+            if own.cursor.is_none() {
+                return Vec::new();
+            }
+            self.focus = Some(Target::Own);
+            let outputs = self.screen.click_own(s, &own, shift);
+            self.did(&outputs);
+            return outputs;
         }
         let Some((row, row_y)) = self.row_at(&view, (x, y)).filter(|(row, _)| row.live) else {
             return Vec::new();
@@ -2550,9 +2870,10 @@ impl<S: Screen + Default> Hosted for Shell<S> {
     fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32) {
         let view = self.view(s, size);
         let cols = &view.cols;
+        let content = self.content(&view);
         self.picked = None;
         self.scroll
-            .wheel(amount, SCROLL_RATE, cols.top, cols.bottom, view.content);
+            .wheel(amount, SCROLL_RATE, cols.top, cols.bottom, content);
     }
     fn key(
         &mut self,
@@ -2593,6 +2914,15 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         let current = self
             .focus
             .and_then(|f| focusables.iter().position(|&(t, _)| t == f));
+        if self.focus == Some(Target::Own) && self.own_open() {
+            self.keyed = true;
+            let own = self.own(&view, (-1.0, -1.0));
+            if let Some(outputs) = self.screen.key_own(s, key, shift, &own) {
+                self.own_follow = true;
+                self.did(&outputs);
+                return outputs;
+            }
+        }
         if key == K::Tab {
             let next = tab_step(focusables.len(), current, shift);
             self.keyed = true;
@@ -2655,6 +2985,7 @@ impl<S: Screen + Default> Hosted for Shell<S> {
                 self.pick(page, &view);
                 vec![CLICK]
             }
+            Some(Target::Tab(page)) => self.open_tab(page),
             Some(Target::Row(_)) => match focused {
                 // A row greyed out while focused does nothing.
                 Some(row) if !row.live => Vec::new(),
@@ -2679,7 +3010,7 @@ impl<S: Screen + Default> Hosted for Shell<S> {
                 self.apply(s)
             }
             Some(Target::Done) => vec![CLICK, Output::Done],
-            Some(Target::Search) | None => Vec::new(),
+            Some(Target::Search | Target::Own) | None => Vec::new(),
         }
     }
     fn typing(&self) -> bool {

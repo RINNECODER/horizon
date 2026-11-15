@@ -224,6 +224,21 @@ impl ShaderOptions {
         self.named(&format!("option.{name}"), name)
     }
 
+    /// Whether every value of option `name` reads the same, so stepping it shows no change: a
+    /// pack's credit line ("by X" in four colours), say.
+    pub fn reads_alike(&self, name: &str) -> bool {
+        let Some(option) = self.options.get(name).filter(|o| !o.switch) else {
+            return false;
+        };
+        let shown = |v: &String| {
+            let text = self.lang.get(&format!("value.{name}.{v}")).unwrap_or(v);
+            Text::legacy(text).plain()
+        };
+        let mut texts = option.values.iter().map(shown);
+        let first = texts.next();
+        texts.all(|t| Some(t) == first)
+    }
+
     /// The value of option `name` as the pack names it, yellow when it is not the default.
     pub fn value_text(&self, name: &str) -> Text {
         let Some(option) = self.options.get(name) else {
@@ -389,5 +404,25 @@ mod tests {
         assert_eq!(o.value("LEVEL"), Some("3"));
         o.next_profile();
         assert_eq!(o.current_profile(), Some("low"));
+    }
+
+    /// A credit line whose values only change colour reads alike; a real choice doesn't.
+    #[test]
+    fn an_option_whose_values_read_the_same_reads_alike() {
+        let mut o = options();
+        o.options.insert(
+            "INFO".to_owned(),
+            PackOption {
+                name: "INFO".into(),
+                default: "0".into(),
+                values: vec!["0".into(), "1".into()],
+                switch: false,
+                tested: true,
+            },
+        );
+        o.lang = Lang::parse("value.INFO.0=§eby Someone\nvalue.INFO.1=§aby Someone\n");
+        assert!(o.reads_alike("INFO"));
+        assert!(!o.reads_alike("LEVEL"));
+        assert!(!o.reads_alike("AO"));
     }
 }
