@@ -99,3 +99,15 @@ fn fs_down(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return sum;
 }
+
+// The first-person hand's pixels (where depthtex0 changed as it drew: `source` holds the depth
+// from before) at the near plane of the far tiles' depth: dh_water, which tests only that depth,
+// then leaves the hand alone.
+@fragment
+fn fs_hand_mask(@builtin(position) p: vec4<f32>) -> @builtin(frag_depth) f32 {
+    let at = vec2<i32>(p.xy);
+    if textureLoad(source, at, 0).r == textureLoad(world_depth, at, 0).r {
+        discard;
+    }
+    return 0.0;
+}

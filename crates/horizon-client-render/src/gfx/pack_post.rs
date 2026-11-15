@@ -846,6 +846,8 @@ pub struct PackPost {
     /// None when it would write nothing: colortex0 holds integers and there is no depth to copy
     /// nor buffer to clear.
     blit: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
+    /// Writes the first-person hand into the far tiles' depth before `dh_water` (`stamp_hand`).
+    hand_mask: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The blit also writes depthtex0 (some program reads it) and clears these buffers.
     blit_depth: bool,
     blit_clears: Vec<usize>,
@@ -3471,7 +3473,10 @@ impl PackPost {
             dh_terrain.is_none() && dh_water.is_none() && reads_depth(Source::DhDepth1);
         let depth1 = (water.is_some() || hand.is_some())
             && (reads_depth(Source::Depth1) || dh_reads_depth1 || (hand.is_none() && reads_depth2));
-        let depth2 = hand.is_some() && reads_depth2;
+        // dh_water tests only the far tiles' depth: the hand's pixels go into it first
+        // (`stamp_hand`), found by depthtex2, the depth before the hand.
+        let stamp_hand = hand.is_some() && dh_water.is_some();
+        let depth2 = hand.is_some() && (reads_depth2 || stamp_hand);
         let water_mask = (water.iter())
             .flat_map(|p| &p.samplers)
             .any(|s| s.source == Source::WaterMask);
@@ -3645,6 +3650,23 @@ impl PackPost {
                 &blit_targets,
                 // GL's window depth, written for depthtex0 and the terrain's depth test.
                 blit_depth.then_some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+            )
+        });
+        let unfiltered = wgpu::TextureSampleType::Float { filterable: false };
+        let hand_mask = stamp_hand.then(|| {
+            helper(
+                device,
+                "vs_full",
+                "fs_hand_mask",
+                &[texture_entry(0, unfiltered), texture_entry(1, unfiltered)],
+                &[],
+                Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(true),
                     depth_compare: Some(wgpu::CompareFunction::Always),
@@ -3897,6 +3919,7 @@ impl PackPost {
                 ..Default::default()
             }),
             blit,
+            hand_mask,
             copy,
             upscale,
             final_target: None,
@@ -4397,6 +4420,9 @@ impl PackPost {
             _ => None,
         };
         if let Some(far) = far {
+            if matches!(far, TerrainList::FarTranslucent) {
+                self.stamp_hand(device, encoder);
+            }
             self.draw_terrain_part(device, queue, encoder, size, far, false, draw);
         }
         // dhDepthTex1: the far tiles' depth before dh_water.
@@ -4415,6 +4441,47 @@ impl PackPost {
         if matches!(list, TerrainList::Solid | TerrainList::ShadowSolid) {
             self.draw_terrain_part(device, queue, encoder, size, list, true, draw);
         }
+    }
+
+    /// The opaque first-person hand into the far tiles' depth (`dhDepthTex0`) at the near plane,
+    /// so `dh_water`, which tests only that depth, doesn't draw the far water over the hand.
+    fn stamp_hand(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let (Some((pipeline, layout)), Some(t)) = (&self.hand_mask, &self.targets) else {
+            return;
+        };
+        let (Some((_, before)), Some([(_, far), _])) = (&t.depth2, &t.dh_depth) else {
+            return;
+        };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shader pack hand mask"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(before),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&t.depth),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Shader pack hand mask"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: far,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// The pass that draws `list`, or the cutout part of the solid list.
