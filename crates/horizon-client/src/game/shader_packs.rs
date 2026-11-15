@@ -349,6 +349,7 @@ impl Game<'_> {
                         if far_terrain {
                             macros.define_distant_horizons();
                         }
+                        macros.define_iris_compat(&chosen_shader_options(name));
                         // Its conditionals test the pack's options too.
                         let (properties, notes) =
                             horizon_shaders::read_properties(&pack, &mut macros);
@@ -581,6 +582,7 @@ impl Game<'_> {
             macros.define_distant_horizons();
         }
         let name = &self.settings.horizon.shader_pack;
+        macros.define_iris_compat(&chosen_shader_options(name));
         self.settings.shader_options = read_shader_options(name, &self.settings.language, &macros);
     }
 

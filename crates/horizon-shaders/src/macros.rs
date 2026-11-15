@@ -3,6 +3,9 @@
 
 use std::collections::BTreeMap;
 
+/// The key in a pack's chosen-options file that turns on `define_iris_compat`.
+pub const IRIS_COMPAT_KEY: &str = "HORIZON_IRIS_COMPAT";
+
 /// The feature flags of `iris.features.*` (spec 3.2) Horizon has. A pack that requires one of
 /// them loads; one it lacks is noted. Horizon defines no `IRIS_FEATURE_<name>` macro for them
 /// (spec OQ-2, docs/cleanroom/README.md): that macro family names another loader, so packs take
@@ -182,6 +185,14 @@ impl Macros {
     /// Horizon's far tiles draw through the pack's `dh_*` programs. `DH_BLOCK_*` are always on.
     pub fn define_distant_horizons(&mut self) {
         self.define("DISTANT_HORIZONS", "");
+    }
+
+    /// `IS_IRIS`, when the pack's file (`shaderpacks/<pack>.txt`) has `HORIZON_IRIS_COMPAT=true`.
+    // Fork-only opt-in: this deviates from spec OQ-2 (no `IS_IRIS`); off unless the player asks.
+    pub fn define_iris_compat(&mut self, chosen: &BTreeMap<String, String>) {
+        if chosen.get(IRIS_COMPAT_KEY).is_some_and(|v| v == "true") {
+            self.define("IS_IRIS", "");
+        }
     }
 
     /// A note for each feature `iris.features.required` names that Horizon lacks; a name matches
@@ -612,6 +623,17 @@ mod tests {
         assert_eq!(mc_version("26.3"), 260300);
         assert_eq!(MC_VERSION, 260300);
         assert_eq!(Macros::standard().get("MC_VERSION"), Some("260300"));
+    }
+
+    #[test]
+    fn is_iris_is_defined_only_when_the_pack_switch_is_on() {
+        let on = BTreeMap::from([(IRIS_COMPAT_KEY.to_owned(), "true".to_owned())]);
+        let off = BTreeMap::from([(IRIS_COMPAT_KEY.to_owned(), "false".to_owned())]);
+        for (chosen, defined) in [(&on, true), (&off, false), (&BTreeMap::new(), false)] {
+            let mut m = Macros::standard();
+            m.define_iris_compat(chosen);
+            assert_eq!(m.get("IS_IRIS").is_some(), defined);
+        }
     }
 
     #[test]
