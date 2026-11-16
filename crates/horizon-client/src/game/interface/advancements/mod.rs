@@ -344,9 +344,17 @@ pub(super) fn item_view(s: &ItemStack) -> ItemView {
             .iter()
             .map(|(id, l)| (id.to_string(), *l))
             .collect(),
+        stored_enchantments: s
+            .stored_enchantments()
+            .iter()
+            .map(|(id, l)| (id.to_string(), *l))
+            .collect(),
         potion: s.potion().map(str::to_owned),
         custom_name: s.custom_name().is_some(),
-        custom_data: None,
+        custom_data: Some(horizon_core::nbt::Tag::Compound(
+            s.custom_data().cloned().unwrap_or_default(),
+        )),
+        components: horizon_client::item_data::components_tag(s.damage, s.data()),
     }
 }
 impl Game<'_> {
@@ -3786,4 +3794,105 @@ pub(super) fn inventory_slots(
     slots.extend(armor.iter().rev().cloned());
     slots.push(offhand.clone());
     slots
+}
+
+#[cfg(test)]
+mod item_predicate_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    struct Nowhere;
+    impl adv::World for Nowhere {
+        fn dimension(&self) -> &str {
+            "minecraft:overworld"
+        }
+        fn weather(&self) -> (bool, bool) {
+            (false, false)
+        }
+        fn biome(&self, _: [i32; 3]) -> String {
+            String::new()
+        }
+        fn structures(&self, _: [i32; 3]) -> Vec<String> {
+            Vec::new()
+        }
+        fn block(&self, _: [i32; 3]) -> (String, BTreeMap<String, String>) {
+            ("minecraft:air".into(), BTreeMap::new())
+        }
+        fn fluid(&self, _: [i32; 3]) -> Option<String> {
+            None
+        }
+        fn can_see_sky(&self, _: [i32; 3]) -> bool {
+            true
+        }
+        fn light(&self, _: [i32; 3]) -> i32 {
+            15
+        }
+        fn smokey(&self, _: [i32; 3]) -> bool {
+            false
+        }
+        fn in_tag(&self, _: &str, _: &str, _: &str) -> bool {
+            false
+        }
+    }
+    fn stack(id: &str, components: &[(&str, serde_json::Value)]) -> ItemStack {
+        let mut s = ItemStack::new(id, 1);
+        for (k, v) in components {
+            s.data_mut()
+                .set_loot_component(k, &Some(horizon_client::scoreboard::json_to_tag(v)));
+        }
+        s
+    }
+    fn matches(predicate: &serde_json::Value, s: &ItemStack) -> bool {
+        adv::item(predicate, &item_view(s), &Nowhere)
+    }
+
+    /// `ItemPredicate.test` checks every part it reads: exact `components`
+    /// (`DataComponentExactPredicate`), `custom_data` given as an object
+    /// (`NbtPredicate` reads SNBT text or a structured tag) and
+    /// `stored_enchantments`. Skipping one let a plain stick pass the
+    /// Dungeons and Taverns chart and enchanted-book checks.
+    #[test]
+    fn item_predicates_read_components_custom_data_and_stored_enchantments() {
+        let chart = json!({
+            "components": {"minecraft:custom_model_data": {"strings": ["dnt:chart"]}},
+            "predicates": {"minecraft:custom_data": {"dnt_chart_bundle": false}}
+        });
+        let model = (
+            "minecraft:custom_model_data",
+            json!({"strings": ["dnt:chart"]}),
+        );
+        let map = |bundle: bool| {
+            stack(
+                "minecraft:filled_map",
+                &[
+                    model.clone(),
+                    ("minecraft:custom_data", json!({"dnt_chart_bundle": bundle})),
+                ],
+            )
+        };
+        assert!(matches(&chart, &map(false)));
+        assert!(!matches(&chart, &map(true)));
+        assert!(!matches(
+            &chart,
+            &stack("minecraft:filled_map", std::slice::from_ref(&model))
+        ));
+        assert!(!matches(&chart, &stack("minecraft:stick", &[])));
+
+        let stored = json!({"predicates": {"minecraft:stored_enchantments": [
+            {"enchantments": "minecraft:sharpness", "levels": {"min": 1, "max": 5}}
+        ]}});
+        let levels = json!({"minecraft:sharpness": 2});
+        let book = stack(
+            "minecraft:enchanted_book",
+            &[("minecraft:stored_enchantments", levels.clone())],
+        );
+        let sword = stack(
+            "minecraft:iron_sword",
+            &[("minecraft:enchantments", levels)],
+        );
+        assert!(matches(&stored, &book));
+        assert!(!matches(&stored, &sword));
+        assert!(!matches(&stored, &stack("minecraft:stick", &[])));
+    }
 }
