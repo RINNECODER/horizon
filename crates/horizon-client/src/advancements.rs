@@ -647,11 +647,15 @@ pub struct ItemView {
     pub count: u32,
     pub damage: u32,
     pub enchantments: Vec<(String, u32)>,
+    pub stored_enchantments: Vec<(String, u32)>,
     pub potion: Option<String>,
     pub custom_name: bool,
     /// Typed snapshot for supported mob equipment views. `None` leaves this
     /// family unprojected and unsupported; an empty compound is actual absence.
     pub custom_data: Option<horizon_world::nbt::Tag>,
+    /// The stack's component patch as saved (`components_tag`); prototype
+    /// defaults are not in it.
+    pub components: Option<horizon_world::nbt::Tag>,
 }
 /// Query snapshot of supported known movement, in blocks/tick, and actual fall distance.
 #[derive(Clone, Copy, Debug)]
@@ -857,10 +861,37 @@ pub fn item(v: &Value, it: &ItemView, w: &dyn World) -> bool {
     {
         return false;
     }
+    // `DataComponentExactPredicate.test`: every other listed component equals
+    // the stack's, both read the way a `set_components` patch is.
+    for (key, want) in comps.as_object().into_iter().flatten() {
+        let id = full(key);
+        if (id == "minecraft:potion_contents" && want.is_string())
+            || (id == "minecraft:damage" && want.is_u64())
+        {
+            continue;
+        }
+        let mut expected = crate::item_data::StackData::default();
+        expected.set_loot_component(&id, want);
+        let expected = crate::item_data::components_tag(0, Some(&expected));
+        // shortcut: the patch lacks prototype defaults, so an exact match on a
+        // default-only component fails; project the defaults if a pack needs it.
+        let actual = it.components.as_ref().and_then(|c| c.get(&id));
+        if expected.as_ref().and_then(|c| c.get(&id)) != actual {
+            return false;
+        }
+    }
     let preds = &v["predicates"];
-    if let Some(list) = keyed(preds, "minecraft:enchantments").and_then(Value::as_array) {
-        for e in list {
-            let ok = it.enchantments.iter().any(|(id, lvl)| {
+    // `EnchantmentsPredicate.Enchantments` / `.StoredEnchantments`.
+    for (key, have) in [
+        ("minecraft:enchantments", &it.enchantments),
+        ("minecraft:stored_enchantments", &it.stored_enchantments),
+    ] {
+        for e in keyed(preds, key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let ok = have.iter().any(|(id, lvl)| {
                 id_matches(&e["enchantments"], "enchantment", id, w)
                     && range_i(&e["levels"], i64::from(*lvl))
             });
@@ -877,12 +908,16 @@ pub fn item(v: &Value, it: &ItemView, w: &dyn World) -> bool {
     }
     // `CustomDataPredicate.matches`: typed subset matching of a projected
     // stack snapshot. Unprojected consumers keep their unsupported behavior.
-    if let Some(pattern) = keyed(preds, "minecraft:custom_data").and_then(Value::as_str)
+    // `TagParser.LENIENT_CODEC` reads the pattern as SNBT text or a structured tag.
+    if let Some(pattern) = keyed(preds, "minecraft:custom_data")
         && let Some(actual) = it.custom_data.as_ref()
     {
-        let Ok(pattern @ horizon_world::nbt::Tag::Compound(_)) =
-            crate::command::snbt::parse_fully(pattern)
-        else {
+        let parsed = match pattern {
+            Value::String(s) => crate::command::snbt::parse_fully(s).ok(),
+            Value::Object(_) => Some(crate::scoreboard::json_to_tag(pattern)),
+            _ => None,
+        };
+        let Some(pattern @ horizon_world::nbt::Tag::Compound(_)) = parsed else {
             return false;
         };
         if !crate::nbt_path::compare_nbt(&pattern, Some(actual)) {
